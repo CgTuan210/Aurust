@@ -1,0 +1,176 @@
+workflows:
+  build-unsigned-ipa:
+    name: Build Unsigned IPA (Aurust)
+    instance_type: mac_mini_m2
+    max_build_duration: 45
+    inputs:
+      ipa_url:
+        description: "Direct link tải file Spotify IPA đã decrypt (Catbox / GitHub Release / R2 / Dropbox ?dl=1)"
+        type: string
+        default: "https://files.catbox.moe/qa5eyg.ipa"
+      app_name:
+        description: "Đổi tên hiển thị của app (để trống = giữ nguyên Spotify)"
+        type: string
+        default: ""
+      bundle_id:
+        description: "Custom Bundle ID (để trống = giữ com.spotify.client để không lỗi mở từ Lock Screen)"
+        type: string
+        default: ""
+      with_safari:
+        description: "Nhúng tiện ích Safari 'Open in Spotify'"
+        type: boolean
+        default: true
+      with_downloads:
+        description: "Vá thêm tính năng Downloads (tự bỏ qua nếu khác phiên bản Spotify hỗ trợ)"
+        type: boolean
+        default: true
+      with_flex:
+        description: "Nhúng thêm bộ công cụ debug giao diện FLEX"
+        type: boolean
+        default: false
+    environment:
+      xcode: latest
+      vars:
+        THEOS: $CM_BUILD_DIR/theos
+        INPUT_IPA_URL: "${{ inputs.ipa_url }}"
+        INPUT_APP_NAME: "${{ inputs.app_name }}"
+        INPUT_BUNDLE_ID: "${{ inputs.bundle_id }}"
+        INPUT_WITH_SAFARI: "${{ inputs.with_safari }}"
+        INPUT_WITH_DOWNLOADS: "${{ inputs.with_downloads }}"
+        INPUT_WITH_FLEX: "${{ inputs.with_flex }}"
+      # Nếu muốn giấu link IPA riêng tư trong App settings -> Environment variables (group: spotify),
+      # bỏ dấu # ở 2 dòng dưới sau khi đã tạo group `spotify` trên web Codemagic:
+      # groups:
+      #   - spotify
+    scripts:
+      - name: Verify Xcode 26+ & iPhoneOS SDK
+        script: |
+          set -euo pipefail
+          xcodebuild -version
+          SDK_LIST="$(ls -d "$(xcode-select -p)"/Platforms/iPhoneOS.platform/Developer/SDKs/iPhoneOS*.sdk 2>/dev/null || true)"
+          if ! printf '%s\n' "$SDK_LIST" | grep -qE 'iPhoneOS(2[6-9]|[3-9][0-9])\.'; then
+            CANDIDATE="$(ls -d /Applications/Xcode-26*.app /Applications/Xcode-27*.app /Applications/Xcode*.app 2>/dev/null | sort -V | tail -n 1 || true)"
+            if [ -n "$CANDIDATE" ]; then
+              sudo xcode-select -s "$CANDIDATE/Contents/Developer"
+            fi
+          fi
+          xcodebuild -version
+          xcrun --sdk iphoneos --show-sdk-version
+
+      - name: Clone Theos
+        script: |
+          set -euo pipefail
+          rm -rf "$THEOS"
+          git clone --depth 1 --recurse-submodules --shallow-submodules https://github.com/theos/theos.git "$THEOS"
+
+      - name: Install Build Tools (gmake, dpkg, ldid, cyan)
+        script: |
+          set -euo pipefail
+          export HOMEBREW_NO_AUTO_UPDATE=1
+          export HOMEBREW_NO_INSTALL_CLEANUP=1
+          brew install make dpkg ldid
+          python3 -m pip install --break-system-packages --upgrade pillow "git+https://github.com/asdfzxcvbn/pyzule-rw.git"
+
+          PY_SCRIPTS="$(python3 -c 'import sysconfig; print(sysconfig.get_path("scripts"))')"
+          PY_USER_BIN="$(python3 -m site --user-base)/bin"
+          BREW_PREFIX="$(brew --prefix)"
+          NEW_PATH="$PY_SCRIPTS:$PY_USER_BIN:$BREW_PREFIX/bin:$BREW_PREFIX/sbin:$PATH"
+          echo "PATH=$NEW_PATH" >> "$CM_ENV"
+          export PATH="$NEW_PATH"
+
+          for cmd in gmake ldid dpkg-deb cyan; do
+            command -v "$cmd" >/dev/null || { echo "Missing required tool: $cmd" >&2; exit 1; }
+          done
+
+      - name: Run Layer & Extension Checks
+        script: |
+          set -euo pipefail
+          bash scripts/check-layers.sh
+          make test-safari
+
+      - name: Download & Validate Decrypted Spotify IPA
+        script: |
+          set -euo pipefail
+          TARGET_URL="${IPA_URL:-$INPUT_IPA_URL}"
+          if [ -z "$TARGET_URL" ]; then
+            echo "Error: Chưa có link IPA. Nhập ipa_url khi bấm Start new build hoặc đặt biến IPA_URL." >&2
+            exit 1
+          fi
+          mkdir -p ipa
+          echo "==> Downloading decrypted Spotify IPA..."
+          curl -fL --retry 3 --retry-delay 3 -o ipa/spotify.ipa "$TARGET_URL"
+
+          MIME="$(file --mime-type -b ipa/spotify.ipa)"
+          case "$MIME" in
+            application/zip|application/x-ios-app|application/octet-stream) ;;
+            *)
+              echo "Error: File tải về không phải IPA hợp lệ (MIME: $MIME). Hãy dùng direct download link!" >&2
+              exit 1
+              ;;
+          esac
+          unzip -Z1 ipa/spotify.ipa | grep -qE '^Payload/[^/]+\.app/Info\.plist$' || {
+            echo "Error: File ZIP không chứa Payload/*.app/Info.plist hợp lệ." >&2
+            exit 1
+          }
+
+      - name: Build & Inject Unsigned IPA
+        script: |
+          set -euo pipefail
+          MOD_VER="$(tr -d '[:space:]' < version.txt 2>/dev/null || echo '0.0.0')"
+          OUT_IPA="out/Aurust-${MOD_VER}-unsigned.ipa"
+
+          ARGS=(ipa/spotify.ipa -o "$OUT_IPA")
+          [ "$INPUT_WITH_FLEX" = "true" ] || ARGS+=(--no-flex)
+          [ "$INPUT_WITH_SAFARI" = "true" ] || ARGS+=(--no-safari)
+          [ "$INPUT_WITH_DOWNLOADS" = "true" ] || ARGS+=(--no-downloads)
+          [ -n "$INPUT_APP_NAME" ] && ARGS+=(--name "$INPUT_APP_NAME")
+
+          export BUNDLE_ID="${BUNDLE_ID:-$INPUT_BUNDLE_ID}"
+          bash scripts/pipeline.sh "${ARGS[@]}"
+
+          ls -lh "$OUT_IPA" tweak/packages/*.deb
+          shasum -a 256 "$OUT_IPA"
+
+    artifacts:
+      - out/*.ipa
+      - tweak/packages/*.deb
+
+  build-tweak-deb:
+    name: Build Tweak Only (.deb)
+    instance_type: mac_mini_m2
+    max_build_duration: 30
+    inputs:
+      ipa_url:
+        description: "Direct link tải file Spotify IPA đã decrypt (để trích bảng cờ remote-config)"
+        type: string
+        default: "https://files.catbox.moe/qa5eyg.ipa"
+    environment:
+      xcode: latest
+      vars:
+        THEOS: $CM_BUILD_DIR/theos
+        INPUT_IPA_URL: "${{ inputs.ipa_url }}"
+    scripts:
+      - name: Clone Theos & Install Tools
+        script: |
+          set -euo pipefail
+          export HOMEBREW_NO_AUTO_UPDATE=1
+          export HOMEBREW_NO_INSTALL_CLEANUP=1
+          rm -rf "$THEOS"
+          git clone --depth 1 --recurse-submodules --shallow-submodules https://github.com/theos/theos.git "$THEOS"
+          brew install make dpkg ldid
+          echo "PATH=$(brew --prefix)/bin:$(brew --prefix)/sbin:$PATH" >> "$CM_ENV"
+
+      - name: Extract Flag Table & Build .deb
+        script: |
+          set -euo pipefail
+          TARGET_URL="${IPA_URL:-$INPUT_IPA_URL}"
+          curl -fL --retry 3 --retry-delay 3 -o decrypted.ipa "$TARGET_URL"
+          python3 scripts/extract-flags.py decrypted.ipa
+          grep -q '^const SGFlagDef SGFlagTable\[\] = {' tweak/Sources/Shared/Flags/SGFlagTable.m 2>/dev/null \
+            || grep -q '^const SGFlagDef SGFlagTable\[\] = {' tweak/Sources/Shared/Flags/SGFlagList.m
+          env -u MAKELEVEL gmake -C tweak clean package
+          rm -f decrypted.ipa
+          ls -lh tweak/packages/*.deb
+
+    artifacts:
+      - tweak/packages/*.deb

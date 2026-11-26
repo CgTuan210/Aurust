@@ -52,15 +52,15 @@ You provide a clean decrypted **Spotify `9.1.90`** `.ipa`; the pipeline compiles
 
 ### 1. Build with Codemagic (Recommended — no Mac needed)
 
-This repo includes [codemagic.yaml](codemagic.yaml) ready for macOS M2 builds:
+This repo includes [codemagic.yaml](codemagic.yaml) with two macOS M2 workflows:
+
+- **`Build Dylib & Deb (Fast - No IPA)`**: fastest build (~2 min), requires **no Spotify IPA** and zero inputs. Outputs `out/Aurust-<version>.dylib`, `out/SpotifyGlassAppGroups.dylib`, `out/liquid-glass.plist`, and `.deb` ready to inject manually (ESign / Feather / Sideloadly / cyan).
+- **`Build Unsigned IPA (Full)`**: injects everything (including **Liquid Glass plist**, **Live Activity extension**, **Safari extension**, and **Downloads** on Spotify `9.1.90`) into a decrypted Spotify IPA and outputs `out/Aurust-<version>-unsigned.ipa` with the default **Spotify** name and Bundle ID.
 
 1. Connect this repository in Codemagic.
 2. Click **Start new build** on branch `stable`.
-3. Select workflow **`Build Unsigned IPA (Aurust)`**.
-4. Leave `ipa_url` at its default (or paste a direct download link to your own decrypted Spotify `9.1.90` IPA — Catbox, GitHub Release, R2, or Dropbox `?dl=1`).
-5. Download the resulting `Aurust-<version>-unsigned.ipa` from **Artifacts**.
-
-> Need only the tweak package? Run the **`Build Tweak Only (.deb)`** workflow instead.
+3. Pick either **`Build Dylib & Deb (Fast - No IPA)`** or **`Build Unsigned IPA (Full)`**.
+4. Download the output from **Artifacts**.
 
 ### 2. Build with GitHub Actions
 

@@ -1,11 +1,94 @@
 workflows:
+  build-dylib:
+    name: Build Dylib & Deb (Fast - No IPA)
+    instance_type: mac_mini_m2
+    max_build_duration: 25
+    environment:
+      xcode: latest
+      vars:
+        THEOS: $CM_BUILD_DIR/theos
+    scripts:
+      - name: Verify Xcode 26+ & iPhoneOS SDK
+        script: |
+          set -euo pipefail
+          xcodebuild -version
+          SDK_LIST="$(ls -d "$(xcode-select -p)"/Platforms/iPhoneOS.platform/Developer/SDKs/iPhoneOS*.sdk 2>/dev/null || true)"
+          if ! printf '%s\n' "$SDK_LIST" | grep -qE 'iPhoneOS(2[6-9]|[3-9][0-9])\.'; then
+            CANDIDATE="$(ls -d /Applications/Xcode-26*.app /Applications/Xcode-27*.app /Applications/Xcode*.app 2>/dev/null | sort -V | tail -n 1 || true)"
+            if [ -n "$CANDIDATE" ]; then
+              sudo xcode-select -s "$CANDIDATE/Contents/Developer"
+            fi
+          fi
+          xcodebuild -version
+          xcrun --sdk iphoneos --show-sdk-version
+
+      - name: Clone Theos & Install Build Tools
+        script: |
+          set -euo pipefail
+          rm -rf "$THEOS"
+          git clone --depth 1 --recurse-submodules --shallow-submodules https://github.com/theos/theos.git "$THEOS"
+          export HOMEBREW_NO_AUTO_UPDATE=1
+          export HOMEBREW_NO_INSTALL_CLEANUP=1
+          brew install make dpkg ldid
+          BREW_PREFIX="$(brew --prefix)"
+          NEW_PATH="$BREW_PREFIX/bin:$BREW_PREFIX/sbin:$PATH"
+          echo "PATH=$NEW_PATH" >> "$CM_ENV"
+          export PATH="$NEW_PATH"
+
+      - name: Run Layer & Extension Checks
+        script: |
+          set -euo pipefail
+          bash scripts/check-layers.sh
+          make test-safari
+
+      - name: Build Aurust .dylib & .deb
+        script: |
+          set -euo pipefail
+          if [ ! -f tweak/Sources/Shared/Flags/SGFlagList.m ]; then
+            cat > tweak/Sources/Shared/Flags/SGFlagList.m <<'EOF'
+          // Stub flag table for fast standalone dylib builds without an IPA.
+          #import "Flags.h"
+
+          const SGFlagDef SGFlagTable[] = {
+              {NULL, SGFlagUnknown, 0, 0, 0},
+          };
+          const NSUInteger SGFlagCount = 0;
+          EOF
+          fi
+
+          env -u MAKELEVEL gmake -C tweak clean package
+
+          mkdir -p out
+          MOD_VER="$(tr -d '[:space:]' < version.txt 2>/dev/null || echo '0.0.0')"
+          DYLIB_SRC="$(find tweak/.theos/obj -maxdepth 3 -name 'spotifyglass.dylib' -type f | head -n 1 || true)"
+          if [ -z "$DYLIB_SRC" ]; then
+            echo "Error: spotifyglass.dylib not found after build" >&2
+            exit 1
+          fi
+          cp "$DYLIB_SRC" "out/Aurust-${MOD_VER}.dylib"
+
+          # Also build the App Group shim dylib for widget compatibility when injecting manually.
+          xcrun --sdk iphoneos clang -target arm64-apple-ios16.0 -dynamiclib -fobjc-arc -Os \
+            -framework Foundation -framework Security \
+            -install_name @rpath/SpotifyGlassAppGroups.dylib \
+            -o out/SpotifyGlassAppGroups.dylib extension/AppGroups/AppGroups.m
+
+          cp plist/liquid-glass.plist out/liquid-glass.plist
+          ls -lh out/*.dylib tweak/packages/*.deb
+          shasum -a 256 "out/Aurust-${MOD_VER}.dylib"
+
+    artifacts:
+      - out/*.dylib
+      - out/liquid-glass.plist
+      - tweak/packages/*.deb
+
   build-unsigned-ipa:
-    name: Build Unsigned IPA (Aurust)
+    name: Build Unsigned IPA (Full)
     instance_type: mac_mini_m2
     max_build_duration: 45
     inputs:
       ipa_url:
-        description: "Link Spotify IPA gốc đã decrypt (để nguyên mặc định để build luôn)"
+        description: "Link Spotify 9.1.90 IPA gốc đã decrypt (để nguyên mặc định để build luôn)"
         type: string
         default: "https://files.catbox.moe/qa5eyg.ipa"
     environment:
@@ -19,7 +102,7 @@ workflows:
           set -euo pipefail
           xcodebuild -version
           SDK_LIST="$(ls -d "$(xcode-select -p)"/Platforms/iPhoneOS.platform/Developer/SDKs/iPhoneOS*.sdk 2>/dev/null || true)"
-          if ! printf '%s\n' "$SDK_LIST" | grep -E 'iPhoneOS(2[6-9]|[3-9][0-9])\.' >/dev/null; then
+          if ! printf '%s\n' "$SDK_LIST" | grep -qE 'iPhoneOS(2[6-9]|[3-9][0-9])\.'; then
             CANDIDATE="$(ls -d /Applications/Xcode-26*.app /Applications/Xcode-27*.app /Applications/Xcode*.app 2>/dev/null | sort -V | tail -n 1 || true)"
             if [ -n "$CANDIDATE" ]; then
               sudo xcode-select -s "$CANDIDATE/Contents/Developer"
@@ -71,27 +154,19 @@ workflows:
           echo "==> Downloading decrypted Spotify IPA..."
           curl -fL --retry 3 --retry-delay 3 -o ipa/spotify.ipa "$TARGET_URL"
 
-          MIME="$(file --mime-type -b ipa/spotify.ipa)"
-          case "$MIME" in
-            application/zip|application/x-ios-app|application/octet-stream) ;;
-            *)
-              echo "Error: File tải về không phải IPA hợp lệ (MIME: $MIME). Hãy dùng direct download link!" >&2
-              exit 1
-              ;;
-          esac
-          python3 - <<'PY'
+          # Validate archive via Python zipfile (avoids SIGPIPE with pipefail when piping unzip -Z1 | grep -q).
+          python3 - ipa/spotify.ipa <<'PY'
           import plistlib, re, sys, zipfile
-          with zipfile.ZipFile("ipa/spotify.ipa") as zf:
-              plists = [n for n in zf.namelist() if re.match(r"^Payload/[^/]+\.app/Info\.plist$", n)]
-              if not plists:
-                  print("Error: File ZIP không chứa Payload/*.app/Info.plist hợp lệ.", file=sys.stderr)
-                  print("Top entries:", zf.namelist()[:15], file=sys.stderr)
-                  sys.exit(1)
-              info = plistlib.loads(zf.read(plists[0]))
-              name = info.get("CFBundleDisplayName") or info.get("CFBundleName") or "?"
-              ver = info.get("CFBundleShortVersionString") or "?"
-              bid = info.get("CFBundleIdentifier") or "?"
-              print(f"==> Verified IPA: {name} {ver} ({bid}) [{plists[0]}]")
+          path = sys.argv[1]
+          if not zipfile.is_zipfile(path):
+              sys.exit("Error: File tải về không phải file ZIP/IPA hợp lệ. Hãy dùng direct download link!")
+          with zipfile.ZipFile(path) as z:
+              names = z.namelist()
+              info = next((n for n in names if re.fullmatch(r'Payload/[^/]+\.app/Info\.plist', n)), None)
+              if not info:
+                  sys.exit("Error: File ZIP không chứa Payload/*.app/Info.plist hợp lệ.")
+              plist = plistlib.loads(z.read(info))
+              print(f"==> Validated IPA: {plist.get('CFBundleIdentifier')} v{plist.get('CFBundleShortVersionString')} ({info})")
           PY
 
       - name: Build & Inject Unsigned IPA
@@ -107,44 +182,4 @@ workflows:
 
     artifacts:
       - out/*.ipa
-      - tweak/packages/*.deb
-
-  build-tweak-deb:
-    name: Build Tweak Only (.deb)
-    instance_type: mac_mini_m2
-    max_build_duration: 30
-    inputs:
-      ipa_url:
-        description: "Link Spotify IPA gốc đã decrypt (để nguyên mặc định để build luôn)"
-        type: string
-        default: "https://files.catbox.moe/qa5eyg.ipa"
-    environment:
-      xcode: latest
-      vars:
-        THEOS: $CM_BUILD_DIR/theos
-        INPUT_IPA_URL: "${{ inputs.ipa_url }}"
-    scripts:
-      - name: Clone Theos & Install Tools
-        script: |
-          set -euo pipefail
-          export HOMEBREW_NO_AUTO_UPDATE=1
-          export HOMEBREW_NO_INSTALL_CLEANUP=1
-          rm -rf "$THEOS"
-          git clone --depth 1 --recurse-submodules --shallow-submodules https://github.com/theos/theos.git "$THEOS"
-          brew install make dpkg ldid
-          echo "PATH=$(brew --prefix)/bin:$(brew --prefix)/sbin:$PATH" >> "$CM_ENV"
-
-      - name: Extract Flag Table & Build .deb
-        script: |
-          set -euo pipefail
-          TARGET_URL="${IPA_URL:-$INPUT_IPA_URL}"
-          curl -fL --retry 3 --retry-delay 3 -o decrypted.ipa "$TARGET_URL"
-          python3 scripts/extract-flags.py decrypted.ipa
-          grep -q '^const SGFlagDef SGFlagTable\[\] = {' tweak/Sources/Shared/Flags/SGFlagTable.m 2>/dev/null \
-            || grep -q '^const SGFlagDef SGFlagTable\[\] = {' tweak/Sources/Shared/Flags/SGFlagList.m
-          env -u MAKELEVEL gmake -C tweak clean package
-          rm -f decrypted.ipa
-          ls -lh tweak/packages/*.deb
-
-    artifacts:
       - tweak/packages/*.deb

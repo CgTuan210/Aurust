@@ -31,12 +31,19 @@ static const NSUInteger kTitleTries = 8;
 static char kTitleKey, kTabKey, kStackWatchedKey, kLayoutKey;
 static __weak UILabel *sg_title;
 static __weak UIView *sg_face;
+static __weak UIScrollView *sg_mainHomeList;
 static UIVisualEffectView *sg_bar;
 static CAGradientLayer *sg_barMask, *sg_barTint;
 static CGFloat sg_scrollProgress;
+static NSInteger sg_profilePhotoVisible = -1;
 // How far the page scrolls before the big title and the avatar are gone and the bar is fully in.
 static const CGFloat kFadeDistance = 48;
 static NSString *sg_tabName;
+
+static BOOL profilePhotoVisible(void) {
+    if (sg_profilePhotoVisible < 0) sg_profilePhotoVisible = SGFlag(SGRKeyNavbarProfilePhoto, YES) ? 1 : 0;
+    return sg_profilePhotoVisible != 0;
+}
 
 static void vanish(UIView *view) {
     if (!view) return;
@@ -110,9 +117,22 @@ static BOOL findHeader(UIView *view) {
     return NO;
 }
 
+static void applyBarEffect(void) {
+    if (!sg_bar) return;
+    // In Smooth Mode, iOS 26's native hardware soft scroll edge effect (SGREdgeEffect.x) already blurs behind
+    // the Home header; keeping only the dark glass gradient avoids stacking a second masked live blur pass.
+    if (SGPerformanceSmooth()) {
+        if (sg_bar.effect) sg_bar.effect = nil;
+        if (sg_bar.layer.mask) sg_bar.layer.mask = nil;
+    } else {
+        if (!sg_bar.effect) sg_bar.effect = [UIBlurEffect effectWithStyle:UIBlurEffectStyleSystemUltraThinMaterialDark];
+        if (sg_bar.layer.mask != sg_barMask) sg_bar.layer.mask = sg_barMask;
+    }
+}
+
 static UIVisualEffectView *barIn(UIView *wrapper) {
     if (!sg_bar) {
-        sg_bar = [[UIVisualEffectView alloc] initWithEffect:[UIBlurEffect effectWithStyle:UIBlurEffectStyleSystemUltraThinMaterialDark]];
+        sg_bar = [[UIVisualEffectView alloc] initWithEffect:nil];
         sg_bar.overrideUserInterfaceStyle = UIUserInterfaceStyleDark;
         sg_bar.userInteractionEnabled = NO;
         sg_bar.accessibilityElementsHidden = YES;
@@ -120,12 +140,12 @@ static UIVisualEffectView *barIn(UIView *wrapper) {
         sg_barMask = [CAGradientLayer layer];
         sg_barMask.colors = @[(id)UIColor.blackColor.CGColor, (id)UIColor.blackColor.CGColor, (id)UIColor.clearColor.CGColor];
         sg_barMask.locations = @[@0, @0.45, @1];
-        sg_bar.layer.mask = sg_barMask;
         sg_barTint = [CAGradientLayer layer];
         sg_barTint.colors = @[(id)[UIColor colorWithWhite:0 alpha:0.92].CGColor, (id)[UIColor colorWithWhite:0 alpha:0.55].CGColor,
                               (id)[UIColor colorWithWhite:0 alpha:0].CGColor];
         sg_barTint.locations = @[@0, @0.5, @1];
         [sg_bar.contentView.layer addSublayer:sg_barTint];
+        applyBarEffect();
     }
     return sg_bar;
 }
@@ -134,11 +154,12 @@ static UIVisualEffectView *barIn(UIView *wrapper) {
 static void applyScroll(UIScrollView *list) {
     CGFloat p = (list.contentOffset.y + list.adjustedContentInset.top) / kFadeDistance;
     p = MAX(0, MIN(1, p));
+    if (fabs(p - sg_scrollProgress) < 0.002 && sg_bar && fabs(sg_bar.alpha - p) < 0.002) return;
     sg_scrollProgress = p;
     if (sg_bar && sg_bar.alpha != p) sg_bar.alpha = p;
     if (sg_title && sg_title.alpha != 1 - p) sg_title.alpha = 1 - p;
     if (sg_face) {
-        BOOL visible = SGFlag(SGRKeyNavbarProfilePhoto, YES);
+        BOOL visible = profilePhotoVisible();
         CGFloat alpha = visible ? 1 - p : 0;
         if (sg_face.alpha != alpha) sg_face.alpha = alpha;
         sg_face.userInteractionEnabled = visible && p < 0.5;
@@ -147,8 +168,9 @@ static void applyScroll(UIScrollView *list) {
 }
 
 void SGRHomeProfilePhotoPreferenceChanged(void) {
+    sg_profilePhotoVisible = -1;
     if (!sg_face) return;
-    BOOL visible = SGFlag(SGRKeyNavbarProfilePhoto, YES);
+    BOOL visible = profilePhotoVisible();
     sg_face.alpha = visible ? 1 - sg_scrollProgress : 0;
     sg_face.userInteractionEnabled = visible && sg_scrollProgress < 0.5;
     sg_face.accessibilityElementsHidden = !visible;
@@ -233,8 +255,11 @@ static void layoutHeader(UIViewController *page) {
     %orig;
     UIScrollView *list = (UIScrollView *)self;
     if (list.bounds.size.height < 300 || !sg_bar) return;
-    for (UIView *v = list.superview; v; v = v.superview) {
-        if ([v isKindOfClass:UICollectionView.class]) return;
+    if (list != sg_mainHomeList) {
+        for (UIView *v = list.superview; v; v = v.superview) {
+            if ([v isKindOfClass:UICollectionView.class]) return;
+        }
+        sg_mainHomeList = list;
     }
     applyScroll(list);
 }
@@ -257,6 +282,12 @@ static void layoutHeader(UIViewController *page) {
 %ctor {
     if (!SGRedesignedUI()) return;
     %init;
+    [NSNotificationCenter.defaultCenter addObserverForName:SGPerformanceDidChangeNotification
+                                                    object:nil
+                                                     queue:NSOperationQueue.mainQueue
+                                                usingBlock:^(NSNotification *note) {
+        applyBarEffect();
+    }];
     SGRequireClasses(@[
         @"_TtC19Home_FunkisPageImpl20FunkisViewController",
         @"_TtC16Home_CarouselKit29TouchCancellingCollectionView",

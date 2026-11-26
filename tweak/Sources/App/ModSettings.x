@@ -34,29 +34,70 @@ static SGModRow *pageRow(NSString *title, NSString *symbol, UIViewController *(^
 // How long the wordmark takes to carry its spectrum all the way round, matching the glow switch's turn.
 static const double kRainbowSpinSeconds = 4;
 
-static UIColor *SGRainbowTextColor(CGFloat width, CGFloat height, double phase) {
-    width = MAX(1, width);
-    height = MAX(1, height);
-    NSArray<UIColor *> *stops = SGGlowRainbowColors();
-    NSUInteger count = stops.count;
-    if (count < 2) return UIColor.whiteColor;
-    NSMutableArray *colors = [NSMutableArray arrayWithCapacity:count];
-    for (UIColor *stop in stops) [colors addObject:(id)stop.CGColor];
-    CGFloat *locations = malloc(sizeof(CGFloat) * count);
-    for (NSUInteger i = 0; i < count; i++) locations[i] = (CGFloat)i / (CGFloat)(count - 1);
-    CGFloat offset = (CGFloat)phase * width;
-    UIGraphicsImageRenderer *renderer = [[UIGraphicsImageRenderer alloc] initWithSize:CGSizeMake(width, height)];
-    UIImage *image = [renderer imageWithActions:^(UIGraphicsImageRendererContext *context) {
-        CGColorSpaceRef space = CGColorSpaceCreateDeviceRGB();
-        CGGradientRef gradient = CGGradientCreateWithColors(space, (__bridge CFArrayRef)colors, locations);
-        CGContextDrawLinearGradient(context.CGContext, gradient, CGPointMake(-offset, 0), CGPointMake(width - offset, 0), 0);
-        CGContextDrawLinearGradient(context.CGContext, gradient, CGPointMake(width - offset, 0), CGPointMake(2 * width - offset, 0), 0);
-        CGGradientRelease(gradient);
-        CGColorSpaceRelease(space);
-    }];
-    free(locations);
-    return [UIColor colorWithPatternImage:image];
+// Pure CoreAnimation rainbow text: a 2x-wide horizontal gradient scrolling across a label mask on the render server
+// with zero CADisplayLink wakeups and zero per-frame CPU bitmap rasterization.
+@interface SGRainbowWordmark : UIView
+@property (nonatomic, readonly) UILabel *label;
+- (instancetype)initWithText:(NSString *)text font:(UIFont *)font;
+- (void)startSpinning;
+- (void)stopSpinning;
+@end
+
+@implementation SGRainbowWordmark {
+    CAGradientLayer *_gradient;
 }
+
+- (instancetype)initWithText:(NSString *)text font:(UIFont *)font {
+    UILabel *label = [UILabel new];
+    label.text = text;
+    label.font = font;
+    label.textColor = UIColor.whiteColor;
+    [label sizeToFit];
+    if (!(self = [super initWithFrame:(CGRect){CGPointZero, label.bounds.size}])) return nil;
+    _label = label;
+    self.clipsToBounds = YES;
+    self.userInteractionEnabled = NO;
+
+    NSArray<UIColor *> *stops = SGGlowRainbowColors();
+    NSMutableArray *colors = [NSMutableArray arrayWithCapacity:stops.count * 2];
+    for (UIColor *stop in stops) [colors addObject:(id)stop.CGColor];
+    for (NSUInteger i = 1; i < stops.count; i++) [colors addObject:(id)stops[i].CGColor];
+
+    _gradient = [CAGradientLayer layer];
+    _gradient.colors = colors;
+    _gradient.startPoint = CGPointMake(0, 0.5);
+    _gradient.endPoint = CGPointMake(1, 0.5);
+    _gradient.anchorPoint = CGPointZero;
+    _gradient.bounds = CGRectMake(0, 0, self.bounds.size.width * 2, self.bounds.size.height);
+    _gradient.position = CGPointZero;
+    [self.layer addSublayer:_gradient];
+    self.maskView = _label;
+    return self;
+}
+
+- (void)layoutSubviews {
+    [super layoutSubviews];
+    _label.frame = self.bounds;
+    _gradient.bounds = CGRectMake(0, 0, MAX(1, self.bounds.size.width) * 2, MAX(1, self.bounds.size.height));
+}
+
+- (void)startSpinning {
+    if (UIAccessibilityIsReduceMotionEnabled() || [_gradient animationForKey:@"rainbow"]) return;
+    CABasicAnimation *slide = [CABasicAnimation animationWithKeyPath:@"position.x"];
+    slide.fromValue = @0;
+    slide.toValue = @(-self.bounds.size.width);
+    slide.duration = kRainbowSpinSeconds;
+    slide.repeatCount = HUGE_VALF;
+    slide.removedOnCompletion = NO;
+    slide.preferredFrameRateRange = CAFrameRateRangeMake(20, 60, 30);
+    [_gradient addAnimation:slide forKey:@"rainbow"];
+}
+
+- (void)stopSpinning {
+    [_gradient removeAnimationForKey:@"rainbow"];
+}
+
+@end
 
 @interface SGTaurusSettingsPage : SGModPage
 - (instancetype)initWithSections:(NSArray<SGModSection *> *)sections;
@@ -64,11 +105,9 @@ static UIColor *SGRainbowTextColor(CGFloat width, CGFloat height, double phase) 
 
 @implementation SGTaurusSettingsPage {
     UIView *_masthead;
-    UILabel *_mastheadTitle, *_mastheadByline, *_compactTitle;
+    SGRainbowWordmark *_mastheadTitle, *_compactTitle;
+    UILabel *_mastheadByline;
     BOOL _compactTitleVisible;
-    CADisplayLink *_rainbowLink;
-    CFTimeInterval _rainbowLast;
-    double _rainbowPhase;
 }
 
 - (instancetype)initWithSections:(NSArray<SGModSection *> *)sections {
@@ -80,12 +119,9 @@ static UIColor *SGRainbowTextColor(CGFloat width, CGFloat height, double phase) 
     _masthead = [[UIView alloc] initWithFrame:CGRectMake(0, 0, self.tableView.bounds.size.width, 132)];
     _masthead.backgroundColor = SGPageBackground();
     _masthead.overrideUserInterfaceStyle = UIUserInterfaceStyleDark;
-    _mastheadTitle = [UILabel new];
-    _mastheadTitle.text = @"taurus";
-    _mastheadTitle.font = [UIFont systemFontOfSize:36 weight:UIFontWeightBold];
-    _mastheadTitle.textAlignment = NSTextAlignmentRight;
-    [_mastheadTitle sizeToFit];
-    _mastheadTitle.textColor = SGRainbowTextColor(_mastheadTitle.bounds.size.width, _mastheadTitle.bounds.size.height, 0);
+    _mastheadTitle = [[SGRainbowWordmark alloc] initWithText:@"taurus" font:[UIFont systemFontOfSize:36 weight:UIFontWeightBold]];
+    _mastheadTitle.isAccessibilityElement = YES;
+    _mastheadTitle.accessibilityLabel = @"taurus";
     _mastheadByline = [UILabel new];
     _mastheadByline.font = [UIFont systemFontOfSize:15 weight:UIFontWeightMedium];
     _mastheadByline.textColor = [UIColor colorWithWhite:1 alpha:0.72];
@@ -94,13 +130,10 @@ static UIColor *SGRainbowTextColor(CGFloat width, CGFloat height, double phase) 
     [_masthead addSubview:_mastheadByline];
     self.tableView.tableHeaderView = _masthead;
 
-    _compactTitle = [UILabel new];
-    _compactTitle.text = @"taurus";
-    _compactTitle.font = [UIFont systemFontOfSize:17 weight:UIFontWeightSemibold];
-    [_compactTitle sizeToFit];
-    _compactTitle.textColor = SGRainbowTextColor(_compactTitle.bounds.size.width, _compactTitle.bounds.size.height, 0);
+    _compactTitle = [[SGRainbowWordmark alloc] initWithText:@"taurus" font:[UIFont systemFontOfSize:17 weight:UIFontWeightSemibold]];
     _compactTitle.alpha = 0;
     _compactTitle.isAccessibilityElement = YES;
+    _compactTitle.accessibilityLabel = @"taurus";
     _compactTitle.accessibilityElementsHidden = YES;
     self.navigationItem.titleView = _compactTitle;
 }
@@ -113,45 +146,14 @@ static UIColor *SGRainbowTextColor(CGFloat width, CGFloat height, double phase) 
         @"by arnaupq, natasha, and samj.", @"by arnaupq, samj, and natasha.",
     ];
     _mastheadByline.text = bylines[arc4random_uniform((uint32_t)bylines.count)];
-    [self startRainbow];
+    [_mastheadTitle startSpinning];
+    if (_compactTitleVisible) [_compactTitle startSpinning];
 }
 
 - (void)viewDidDisappear:(BOOL)animated {
     [super viewDidDisappear:animated];
-    [self stopRainbow];
-}
-
-- (void)startRainbow {
-    if (_rainbowLink) return;
-    _rainbowLink = [CADisplayLink displayLinkWithTarget:self selector:@selector(rainbowTick:)];
-    _rainbowLink.preferredFrameRateRange = CAFrameRateRangeMake(24, 30, 30);
-    [_rainbowLink addToRunLoop:NSRunLoop.mainRunLoop forMode:NSRunLoopCommonModes];
-}
-
-- (void)stopRainbow {
-    [_rainbowLink invalidate];
-    _rainbowLink = nil;
-    _rainbowLast = 0;
-}
-
-- (void)rainbowTick:(CADisplayLink *)link {
-    CFTimeInterval step = _rainbowLast > 0 ? MIN(link.timestamp - _rainbowLast, 0.1) : 0;
-    _rainbowLast = link.timestamp;
-    _rainbowPhase += step / kRainbowSpinSeconds;
-    _rainbowPhase -= floor(_rainbowPhase);
-    [self applyRainbow];
-}
-
-- (void)applyRainbow {
-    CGSize compact = _compactTitle.bounds.size;
-    if (_compactTitleVisible) {
-        if (compact.width >= 1)
-            _compactTitle.textColor = SGRainbowTextColor(compact.width, compact.height, _rainbowPhase);
-        return;
-    }
-    CGSize title = _mastheadTitle.bounds.size;
-    if (title.width >= 1)
-        _mastheadTitle.textColor = SGRainbowTextColor(title.width, title.height, _rainbowPhase);
+    [_mastheadTitle stopSpinning];
+    [_compactTitle stopSpinning];
 }
 
 - (void)viewDidLayoutSubviews {
@@ -180,11 +182,14 @@ static UIColor *SGRainbowTextColor(CGFloat width, CGFloat height, double phase) 
     if (show == _compactTitleVisible) return;
     _compactTitleVisible = show;
     if (show) {
+        [_compactTitle startSpinning];
         _compactTitle.accessibilityElementsHidden = NO;
         [UIView animateWithDuration:0.18 animations:^{ self->_compactTitle.alpha = 1; }];
     } else {
         _compactTitle.accessibilityElementsHidden = YES;
-        [UIView animateWithDuration:0.18 animations:^{ self->_compactTitle.alpha = 0; }];
+        [UIView animateWithDuration:0.18 animations:^{ self->_compactTitle.alpha = 0; } completion:^(BOOL finished) {
+            if (!self->_compactTitleVisible) [self->_compactTitle stopSpinning];
+        }];
     }
 }
 

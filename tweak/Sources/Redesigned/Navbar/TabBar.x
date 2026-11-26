@@ -732,8 +732,8 @@ static void syncBar(UIView *stockBar) {
         UITabBarItem *item = bar.items[i];
         UIImage *image = glyphOf(sources[i], sources[i] == sg_customSource);
         UIImage *selectedImage = glyphOf(sources[i], YES);
-        if (image) item.image = image;
-        if (selectedImage) item.selectedImage = selectedImage;
+        if (image && item.image != image) item.image = image;
+        if (selectedImage && item.selectedImage != selectedImage) item.selectedImage = selectedImage;
         missing |= !item.image || !item.selectedImage;
         NSString *title = hideLabels ? nil : labelIn(sources[i]).text;
         if (hideLabels ? item.title != nil : title.length && ![title isEqualToString:item.title]) item.title = title;
@@ -756,9 +756,9 @@ static void syncBar(UIView *stockBar) {
     place(bar, host.bounds);
     if (host.superview != stockBar) [stockBar addSubview:host];
     else if (stockBar.subviews.lastObject != host) [stockBar bringSubviewToFront:host];
-    if (host.window) {
+    if (host.window && sg_minimized) {
         CGRect row = layoutDock(stockBar, host, bar, NULL, NULL);
-        if (sg_minimized) SGRDockNowPlayingCard(YES, row, host, NO);
+        SGRDockNowPlayingCard(YES, row, host, NO);
     }
     logBarOnce(bar);
     makeRoom(containerOf(stockBar));

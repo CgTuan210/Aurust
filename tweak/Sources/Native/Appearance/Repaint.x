@@ -9,16 +9,26 @@ __weak UIView *sg_npvBackdropRoot = nil;
 
 %hook CALayer
 - (void)setBackgroundColor:(CGColorRef)color {
-    if (color && (sg_lyricsCardRoot || sg_lyricsPageRoot || sg_homeRoot || sg_npvBackdropRoot)) {
-        UIView *view = (UIView *)self.delegate;
-        if ([view isKindOfClass:UIView.class] && view.layer == self && !SGKeepsColor(view)) {
-            if (SGIsInside(view, sg_lyricsCardRoot) || SGIsInside(view, sg_lyricsPageRoot)) {
-                color = NULL;
-            } else if (SGIsInside(view, sg_npvBackdropRoot)) {
-                // The album colour arrives on the plane per track, outside any layout pass.
-                color = NULL;
-            } else if (SGIsBaseSurface(color) && SGIsInside(view, sg_homeRoot)) {
-                color = NULL;
+    if (color) {
+        UIView *card = sg_lyricsCardRoot;
+        UIView *page = sg_lyricsPageRoot;
+        UIView *home = sg_homeRoot;
+        UIView *npv = sg_npvBackdropRoot;
+        if (card || page || home || npv) {
+            UIView *view = (UIView *)self.delegate;
+            if ([view isKindOfClass:UIView.class] && view.layer == self && !SGKeepsColor(view)) {
+                for (UIView *v = view; v; v = v.superview) {
+                    if ([v isKindOfClass:UIVisualEffectView.class]) break;
+                    if (v == card || v == page || v == npv) {
+                        // The album colour arrives on the plane per track, outside any layout pass.
+                        color = NULL;
+                        break;
+                    }
+                    if (v == home) {
+                        if (SGIsBaseSurface(color)) color = NULL;
+                        break;
+                    }
+                }
             }
         }
     }

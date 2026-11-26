@@ -788,12 +788,25 @@ static UIImage *renderFrozenBlurImage(CGImageRef snapshot, CGSize boundsSize, CG
     return image;
 }
 
+static dispatch_queue_t karaokeBlurQueue(void) {
+    static dispatch_queue_t queue;
+    static dispatch_once_t once;
+    dispatch_once(&once, ^{
+        dispatch_queue_attr_t attr = dispatch_queue_attr_make_with_qos_class(DISPATCH_QUEUE_SERIAL, QOS_CLASS_USER_INITIATED, 0);
+        queue = dispatch_queue_create("spotifyglass.karaoke.blur", attr);
+    });
+    return queue;
+}
+
 @implementation SGRKaraokeLineView {
     UIView *_content;
     UIImageView *_frozenBlur;
     CGImageRef _contentSnapshot;
+    NSMutableDictionary<NSNumber *, UIImage *> *_blurImages;
+    NSMutableDictionary<NSNumber *, NSValue *> *_blurPads;
     CGFloat _frozenRadius;
     NSUInteger _blurGen;
+    NSUInteger _snapshotGen;
     NSArray<SGRKaraokeSweep *> *_sweeps;
     NSArray<SGRKaraokeWordView *> *_words;
     NSArray<SGRKaraokeWordView *> *_lyricWords;
@@ -885,26 +898,8 @@ static const NSUInteger kLinesPerFrame = 4;
     if (_frozenBlur) _frozenBlur.hidden = YES;
 }
 
-// Replaces ~25 UILabel sublayers + per-frame CAFilter Gaussian blur shader with a single pre-blurred sprite quad.
-- (void)freezeAtBlur:(CGFloat)blur crossfade:(BOOL)crossfade {
-    if (_active || blur <= 0.05 || !_allowsBlur) return;
-    if (_frozenBlur.image && fabs(_frozenRadius - blur) < 0.05) {
-        [self.layer removeAnimationForKey:@"blur"];
-        if (self.layer.filters) self.layer.filters = nil;
-        _content.hidden = YES;
-        _frozenBlur.hidden = NO;
-        return;
-    }
-    if (!_contentSnapshot) {
-        BOOL wasHidden = _content.hidden;
-        _content.hidden = NO;
-        _contentSnapshot = createLineContentSnapshot(_content.layer, self.bounds.size);
-        _content.hidden = wasHidden;
-        if (!_contentSnapshot) return;
-    }
-    CGSize pad = CGSizeZero;
-    UIImage *baked = renderFrozenBlurImage(_contentSnapshot, self.bounds.size, blur, &pad);
-    if (!baked) return;
+- (void)applyFrozenImage:(UIImage *)baked pad:(CGSize)pad radius:(CGFloat)blur crossfade:(BOOL)crossfade {
+    if (!baked || _active || blur <= 0.05 || !_allowsBlur) return;
     if (!_frozenBlur) {
         _frozenBlur = [[UIImageView alloc] initWithFrame:CGRectZero];
         _frozenBlur.userInteractionEnabled = NO;
@@ -913,7 +908,7 @@ static const NSUInteger kLinesPerFrame = 4;
     if (crossfade && !_frozenBlur.hidden && _frozenBlur.image) {
         CATransition *fade = [CATransition animation];
         fade.type = kCATransitionFade;
-        fade.duration = 0.5;
+        fade.duration = 0.45;
         [_frozenBlur.layer addAnimation:fade forKey:@"blurCrossfade"];
     }
     _frozenRadius = blur;
@@ -923,6 +918,58 @@ static const NSUInteger kLinesPerFrame = 4;
     if (self.layer.filters) self.layer.filters = nil;
     _content.hidden = YES;
     _frozenBlur.hidden = NO;
+}
+
+// Replaces ~25 UILabel sublayers + per-frame CAFilter Gaussian blur shader with a single pre-blurred sprite quad,
+// rendered off the main thread so rapid line scrolls incur 0 ms of blur CPU stall even when throttled.
+- (void)freezeAtBlur:(CGFloat)blur crossfade:(BOOL)crossfade {
+    if (_active || blur <= 0.05 || !_allowsBlur) return;
+    if (_frozenBlur.image && fabs(_frozenRadius - blur) < 0.05) {
+        [self.layer removeAnimationForKey:@"blur"];
+        if (self.layer.filters) self.layer.filters = nil;
+        _content.hidden = YES;
+        _frozenBlur.hidden = NO;
+        return;
+    }
+    NSNumber *bucket = @((NSInteger)llround(blur * 4.0));
+    UIImage *cached = _blurImages[bucket];
+    if (cached) {
+        [self applyFrozenImage:cached pad:_blurPads[bucket].CGSizeValue radius:blur crossfade:crossfade];
+        return;
+    }
+    if (!_contentSnapshot) {
+        BOOL wasHidden = _content.hidden;
+        _content.hidden = NO;
+        _contentSnapshot = createLineContentSnapshot(_content.layer, self.bounds.size);
+        _content.hidden = wasHidden;
+        if (!_contentSnapshot) return;
+        _snapshotGen++;
+    }
+    CGImageRef snap = CGImageRetain(_contentSnapshot);
+    CGSize boundsSize = self.bounds.size;
+    NSUInteger gen = _blurGen;
+    NSUInteger snapGen = _snapshotGen;
+    __weak SGRKaraokeLineView *weakSelf = self;
+    dispatch_async(karaokeBlurQueue(), ^{
+        CGSize pad = CGSizeZero;
+        UIImage *baked = renderFrozenBlurImage(snap, boundsSize, blur, &pad);
+        CGImageRelease(snap);
+        if (!baked) return;
+        dispatch_async(dispatch_get_main_queue(), ^{
+            SGRKaraokeLineView *lineView = weakSelf;
+            if (!lineView) return;
+            if (lineView->_snapshotGen == snapGen) {
+                if (!lineView->_blurImages) {
+                    lineView->_blurImages = [NSMutableDictionary dictionaryWithCapacity:6];
+                    lineView->_blurPads = [NSMutableDictionary dictionaryWithCapacity:6];
+                }
+                lineView->_blurImages[bucket] = baked;
+                lineView->_blurPads[bucket] = [NSValue valueWithCGSize:pad];
+            }
+            if (gen != lineView->_blurGen || lineView->_active || lineView->_blur <= 0.05) return;
+            [lineView applyFrozenImage:baked pad:pad radius:blur crossfade:crossfade];
+        });
+    });
 }
 
 - (void)setBlur:(CGFloat)blur animated:(BOOL)animated {
@@ -1058,6 +1105,9 @@ static const NSUInteger kLinesPerFrame = 4;
         CGImageRelease(_contentSnapshot);
         _contentSnapshot = NULL;
     }
+    _snapshotGen++;
+    [_blurImages removeAllObjects];
+    [_blurPads removeAllObjects];
     [_bubble removeFromSuperview];
     _bubble = nil;
     [_underline removeFromSuperlayer];
@@ -1326,6 +1376,7 @@ typedef struct {
     SGRKaraokeSpan *_spans;
     SGRKaraokeBreak *_breaks;
     NSUInteger _breakCount;
+    NSInteger _maxSpanDuration;
     NSInteger _sung[kMostSung];
     NSUInteger _sungCount;
     NSInteger _focus;       // the line the stack is arranged around, -1 before the first
@@ -1606,10 +1657,17 @@ typedef struct {
     [self scheduleLink];
 }
 
+- (CGFloat)currentScrollOffsetY {
+    if (_scroll.layer.animationKeys.count > 0) {
+        CALayer *shown = (CALayer *)_scroll.layer.presentationLayer;
+        if (shown) return shown.bounds.origin.y;
+    }
+    return _scroll.bounds.origin.y;
+}
+
 - (void)alignFade {
-    CALayer *shown = (CALayer *)_scroll.layer.presentationLayer ?: _scroll.layer;
     UIEdgeInsets band = [self shownBand];
-    CGRect frame = CGRectMake(0, shown.bounds.origin.y + band.top, self.bounds.size.width,
+    CGRect frame = CGRectMake(0, [self currentScrollOffsetY] + band.top, self.bounds.size.width,
                               MAX(0, self.bounds.size.height - band.top - band.bottom));
     if (CGRectEqualToRect(frame, _fade.frame)) return;
     [CATransaction begin];
@@ -1738,6 +1796,7 @@ static BOOL lyricsAreForeign(NSArray<SGKaraokeLine *> *lines, NSString *language
     _spans = calloc(count + 1, sizeof(SGRKaraokeSpan));
     _breaks = calloc(count + 1, sizeof(SGRKaraokeBreak));
     _breakCount = 0;
+    _maxSpanDuration = 0;
     _hasSpoken = _hasTranslation = _untranslated = NO;
     if (_track) SGLyricsSyncSavedTranslation(_track, SGLyricsGeminiLanguage(), _lines);
     _foreign = lyricsAreForeign(_lines, SGLyricsGeminiLanguage());
@@ -1745,7 +1804,9 @@ static BOOL lyricsAreForeign(NSArray<SGKaraokeLine *> *lines, NSString *language
     NSInteger sungTo = 0;   // the top of the song counts as where the singing before the first line ends
     for (NSUInteger i = 0; i < count; i++) {
         SGKaraokeLine *line = _lines[i];
-        _spans[i] = (SGRKaraokeSpan){line.start, SGKaraokeSungEnd(line)};
+        NSInteger endMs = SGKaraokeSungEnd(line);
+        _spans[i] = (SGRKaraokeSpan){line.start, endMs};
+        if (endMs > line.start) _maxSpanDuration = MAX(_maxSpanDuration, endMs - line.start);
         if (!_plain && line.start - sungTo >= kBreakMinMs) _breaks[_breakCount++] = (SGRKaraokeBreak){sungTo, line.start, (NSInteger)i};
         sungTo = MAX(sungTo, _spans[i].end);
         _hasSpoken = _hasSpoken || line.pronunciation || line.backing.pronunciation;
@@ -2041,7 +2102,7 @@ static BOOL lyricsAreForeign(NSArray<SGKaraokeLine *> *lines, NSString *language
 // one for every line, and the lines in sight are the only ones the compositor has to draw.
 - (void)showLinesInSight {
     if (!_tops.count) return;
-    CGFloat offset = ((CALayer *)_scroll.layer.presentationLayer ?: _scroll.layer).bounds.origin.y;
+    CGFloat offset = [self currentScrollOffsetY];
     if (offset == _sightOffset && _focusTop == _sightFocus && _arrangement == _sightArrangement) return;
     _sightOffset = offset;
     _sightFocus = _focusTop;
@@ -2313,18 +2374,34 @@ static BOOL lyricsAreForeign(NSArray<SGKaraokeLine *> *lines, NSString *language
 
 - (NSUInteger)sungAt:(double)now into:(NSInteger *)sung focus:(NSInteger *)focus openBreak:(NSInteger *)openBreak {
     NSInteger count = (NSInteger)_lines.count, last = -1;
-    while (last + 1 < count && _spans[last + 1].start <= now) last++;
+    NSInteger lo = 0, hi = count - 1;
+    while (lo <= hi) {
+        NSInteger mid = lo + ((hi - lo) >> 1);
+        if (_spans[mid].start <= now) {
+            last = mid;
+            lo = mid + 1;
+        } else {
+            hi = mid - 1;
+        }
+    }
     *openBreak = -1;
     NSInteger breakLine = -1;
     for (NSUInteger i = 0; i < _breakCount; i++) {
         SGRKaraokeBreak pause = _breaks[i];
-        if (now < pause.start || now >= pause.end) continue;
+        if (now < pause.start) break;
+        if (now >= pause.end) continue;
         breakLine = pause.line;
         if (now < pause.end - kBreakCollapse * 1000) *openBreak = pause.line;
+        break;
     }
     NSUInteger found = 0;
-    for (NSInteger i = 0; i <= last && found < kMostSung; i++) {
-        if (_spans[i].end > now || (i == last && breakLine < 0)) sung[found++] = i;
+    if (last >= 0) {
+        double floorMs = now - _maxSpanDuration;
+        NSInteger startIdx = last;
+        while (startIdx > 0 && _spans[startIdx - 1].start >= floorMs) startIdx--;
+        for (NSInteger i = startIdx; i <= last && found < kMostSung; i++) {
+            if (_spans[i].end > now || (i == last && breakLine < 0)) sung[found++] = i;
+        }
     }
     *focus = breakLine >= 0 ? breakLine : found ? sung[0] : last;
     return found;

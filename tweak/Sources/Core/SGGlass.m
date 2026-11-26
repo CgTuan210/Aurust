@@ -44,14 +44,32 @@ void SGHideGlassFrom(UIView *host, NSUInteger count) {
     for (NSUInteger i = count; i < panes.count; i++) panes[i].hidden = YES;
 }
 
+static char kGlassShapeKey;
+
 void SGShapeGlass(UIView *glass, CGFloat radius, BOOL capsule) {
-    Class config = NSClassFromString(@"UICornerConfiguration");
-    Class cornerRadius = NSClassFromString(@"UICornerRadius");
+    if (!glass) return;
+    static Class config, cornerRadius;
+    static BOOL supportsConfig, supportsCapsule, supportsUniform;
+    static dispatch_once_t once;
+    dispatch_once(&once, ^{
+        config = NSClassFromString(@"UICornerConfiguration");
+        cornerRadius = NSClassFromString(@"UICornerRadius");
+        supportsConfig = config && [UIView instancesRespondToSelector:@selector(setCornerConfiguration:)];
+        supportsCapsule = config && [config respondsToSelector:@selector(capsuleConfiguration)];
+        supportsUniform = config && [config respondsToSelector:@selector(configurationWithUniformRadius:)]
+            && [cornerRadius respondsToSelector:@selector(fixedRadius:)];
+    });
+    CGFloat effective = capsule && !supportsConfig ? glass.bounds.size.height / 2 : radius;
+    NSNumber *last = objc_getAssociatedObject(glass, &kGlassShapeKey);
+    // Pack capsule bit + 0.25pt-quantized radius so unchanged layout passes return in O(1).
+    NSInteger stamp = ((NSInteger)llround(effective * 4.0) << 1) | (capsule ? 1 : 0);
+    if (last && last.integerValue == stamp) return;
+
     id shape = nil;
-    if (config && [glass respondsToSelector:@selector(setCornerConfiguration:)]) {
-        if (capsule && [config respondsToSelector:@selector(capsuleConfiguration)]) {
+    if (supportsConfig && [glass respondsToSelector:@selector(setCornerConfiguration:)]) {
+        if (capsule && supportsCapsule) {
             shape = [config capsuleConfiguration];
-        } else if ([config respondsToSelector:@selector(configurationWithUniformRadius:)] && [cornerRadius respondsToSelector:@selector(fixedRadius:)]) {
+        } else if (supportsUniform) {
             shape = [config configurationWithUniformRadius:[cornerRadius fixedRadius:radius]];
         }
     }
@@ -59,8 +77,9 @@ void SGShapeGlass(UIView *glass, CGFloat radius, BOOL capsule) {
         [glass setCornerConfiguration:shape];
         glass.clipsToBounds = NO;
     } else {
-        glass.layer.cornerRadius = capsule ? glass.bounds.size.height / 2 : radius;
+        glass.layer.cornerRadius = effective;
         glass.layer.cornerCurve = kCACornerCurveContinuous;
         glass.clipsToBounds = YES;
     }
+    objc_setAssociatedObject(glass, &kGlassShapeKey, @(stamp), OBJC_ASSOCIATION_RETAIN_NONATOMIC);
 }

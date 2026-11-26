@@ -76,10 +76,10 @@ static CGFloat screenRadius(void) {
     UIView *_sheet;
     UIImageView *_cover;
     CALayer *_mask;
-    CGRect _card, _barArtwork, _barRest, _spotifyFrame;
-    CGFloat _cardRadius, _spotifyAlpha;
+    CGRect _card, _barArtwork, _barRest, _spotifyFrame, _coverInPlayer;
+    CGFloat _cardRadius, _spotifyAlpha, _coverScale, _lastT, _lastOriginY;
     CGColorRef _overlayColor;
-    BOOL _coverHidden;
+    BOOL _coverHidden, _hasCoverFrame, _motionShowing;
     BOOL _follows;   // 9.1.90: Spotify animates the player's frame and alpha, which the morph then only reads
 }
 
@@ -108,6 +108,11 @@ static CGFloat screenRadius(void) {
     _cardRadius = radius;
     _barArtwork = SGRNowPlayingArtworkFrameIn(container);
     _spotifyAlpha = overlay.alpha;
+    _coverInPlayer = CGRectNull;
+    _coverScale = SGRPlayerCoverScale();
+    _motionShowing = SGRPlayerMotionShowing();
+    _lastT = -1;
+    _lastOriginY = CGFLOAT_MAX;
 
     _sheet = [[UIView alloc] initWithFrame:card];
     _sheet.userInteractionEnabled = NO;
@@ -122,6 +127,8 @@ static CGFloat screenRadius(void) {
     overlay.layer.backgroundColor = NULL;
 
     _mask = [CALayer layer];
+    NSNull *off = NSNull.null;
+    _mask.actions = @{@"bounds": off, @"position": off, @"frame": off, @"cornerRadius": off};
     _mask.backgroundColor = UIColor.blackColor.CGColor;
     _mask.cornerCurve = kCACornerCurveContinuous;
     overlay.layer.mask = _mask;
@@ -158,12 +165,16 @@ static CGFloat screenRadius(void) {
     }
     CGRect full = container.bounds;
     CGRect sheet = lerpRect(_card, full, t);
+    CGPoint origin = _follows ? _spotifyFrame.origin : CGPointMake(_spotifyFrame.origin.x, sheet.origin.y);
+    if (_hasCoverFrame && fabs(t - _lastT) < 0.0005 && fabs(origin.y - _lastOriginY) < 0.25) return;
+    _lastT = t;
+    _lastOriginY = origin.y;
+
     CGFloat radius = lerp(_cardRadius, screenRadius(), t);
     CGFloat scale = full.size.width > 0 ? sheet.size.width / full.size.width : 1;
     // The player's top goes to the sheet's: a mask clips nothing above the layer's bounds, so content
     // raised above Spotify's frame would show square corners. Spotify reads back only the player's
     // height (0x109815b4c, 0x109815c28), which stays.
-    CGPoint origin = _follows ? _spotifyFrame.origin : CGPointMake(_spotifyFrame.origin.x, sheet.origin.y);
     CGSize size = overlay.bounds.size;
     CGPoint middle = CGPointMake(size.width / 2, size.height / 2);
     CGPoint target = CGPointMake(sheet.origin.x - origin.x, sheet.origin.y - origin.y);
@@ -173,9 +184,20 @@ static CGFloat screenRadius(void) {
     [CATransaction begin];
     [CATransaction setDisableActions:YES];
     [UIView performWithoutAnimation:^{
-        overlay.layer.sublayerTransform = CATransform3DIdentity;
         if (!self->_follows) overlay.frame = (CGRect){origin, self->_spotifyFrame.size};
-        CGRect coverInPlayer = SGRPlayerCoverFrameIn(overlay);
+        // Read the cover's resting frame once it lays out instead of resetting sublayerTransform and walking
+        // the view hierarchy 120 times per second during the morph.
+        if (self->_cover && !self->_hasCoverFrame) {
+            overlay.layer.sublayerTransform = CATransform3DIdentity;
+            CGRect found = SGRPlayerCoverFrameIn(overlay);
+            if (!CGRectIsNull(found) && found.size.width > 1) {
+                self->_coverInPlayer = found;
+                self->_hasCoverFrame = YES;
+                self->_coverScale = SGRPlayerCoverScale();
+                self->_motionShowing = SGRPlayerMotionShowing();
+            }
+        }
+        CGRect coverInPlayer = self->_coverInPlayer;
 
         overlay.layer.sublayerTransform = CATransform3DScale(CATransform3DMakeTranslation(shift.x, shift.y, 0), scale, scale, 1);
         self->_mask.frame = CGRectMake(target.x, target.y, sheet.size.width, sheet.size.height);
@@ -214,10 +236,10 @@ static CGFloat screenRadius(void) {
                 to = CGRectOffset(to, -sheet.origin.x, -sheet.origin.y);
                 self->_cover.frame = CGRectOffset(lerpRect(from, to, t), sheet.origin.x, sheet.origin.y);
                 // The cover's corners are drawn under its paused shrink too.
-                self->_cover.layer.cornerRadius = lerp(from.size.width / 2, SGRRadiusArtwork * SGRPlayerCoverScale() * scale, t);
+                self->_cover.layer.cornerRadius = lerp(from.size.width / 2, SGRRadiusArtwork * self->_coverScale * scale, t);
                 // Over an animated artwork the player's cover is hidden: the flown one fades out on the
                 // way there instead of landing on an empty slot.
-                self->_cover.alpha = SGRPlayerMotionShowing() ? 1 - ramp(0.6, 1, t) : 1;
+                self->_cover.alpha = self->_motionShowing ? 1 - ramp(0.6, 1, t) : 1;
             }
         }
     }];
@@ -386,7 +408,10 @@ static void followTransition(id transition, id<UIViewControllerContextTransition
         follower.sped = YES;
     }
     follower.link = [CADisplayLink displayLinkWithTarget:follower selector:@selector(tick:)];
-    follower.link.preferredFrameRateRange = CAFrameRateRangeMake(80, 120, 120);
+    NSInteger maxFPS = UIScreen.mainScreen.maximumFramesPerSecond;
+    follower.link.preferredFrameRateRange = maxFPS <= 60
+        ? CAFrameRateRangeMake(30, 60, 60)
+        : CAFrameRateRangeMake(80, 120, 120);
     [follower.link addToRunLoop:NSRunLoop.mainRunLoop forMode:NSRunLoopCommonModes];
     objc_setAssociatedObject(transition, &kFollowerKey, follower, OBJC_ASSOCIATION_RETAIN_NONATOMIC);
     [follower tick:follower.link];

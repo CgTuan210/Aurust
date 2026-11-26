@@ -22,7 +22,7 @@ static const CGFloat kFlowSaturationLift = 1.25, kFlowSaturationMax = 0.9, kFlow
 @property (nonatomic, readwrite) UIImage *backdrop;
 @property (nonatomic, readwrite) UIImage *dissolve;
 @property (nonatomic, readwrite) NSArray<UIColor *> *flowColors;
-@property (nonatomic, readwrite) NSArray<UIImage *> *fillBlurs;
+@property (nonatomic, readwrite) UIImage *fillBlur;
 @property (nonatomic, readwrite) UIColor *fillBackgroundColor;
 @end
 
@@ -201,18 +201,80 @@ static CGImageRef newBlurred(CGImageRef image, size_t width, size_t height, CGFl
     return [blurContext() createCGImage:output fromRect:input.extent format:kCIFormatRGBA8 colorSpace:sRGB()];
 }
 
-static NSArray<UIImage *> *fillBlursOf(CGImageRef image, BOOL smooth) {
+static UIImage *fillBlurOf(CGImageRef image, BOOL smooth) {
     static const CGFloat radii[] = {2.5, 6.0, 12.0, 22.0};
+    static const CGFloat bands[4][2] = {{0.74, 0.84}, {0.79, 0.89}, {0.84, 0.94}, {0.89, 0.985}};
     size_t side = smooth ? 224 : 384;
     CGFloat radiusScale = (CGFloat)side / 640.0;
-    NSMutableArray<UIImage *> *images = [NSMutableArray arrayWithCapacity:sizeof radii / sizeof *radii];
-    for (NSUInteger index = 0; index < sizeof radii / sizeof *radii; index++) {
-        CGImageRef blurred = newBlurred(image, side, side, radii[index] * radiusScale);
-        if (!blurred) return nil;
-        [images addObject:[UIImage imageWithCGImage:blurred scale:1 orientation:UIImageOrientationUp]];
-        CGImageRelease(blurred);
+    CGContextRef dstCtx = newBitmap(side, side);
+    CGContextRef srcCtx = newBitmap(side, side);
+    if (!dstCtx || !srcCtx) {
+        if (dstCtx) CGContextRelease(dstCtx);
+        if (srcCtx) CGContextRelease(srcCtx);
+        return nil;
     }
-    return images;
+    uint8_t *dst = CGBitmapContextGetData(dstCtx);
+    uint8_t *src = CGBitmapContextGetData(srcCtx);
+    memset(dst, 0, side * side * 4);
+    size_t firstRow = (size_t)floor(bands[0][0] * (double)side);
+    for (NSUInteger index = 0; index < 4; index++) {
+        CGImageRef blurred = newBlurred(image, side, side, radii[index] * radiusScale);
+        if (!blurred) {
+            CGContextRelease(srcCtx);
+            CGContextRelease(dstCtx);
+            return nil;
+        }
+        CGContextClearRect(srcCtx, CGRectMake(0, 0, side, side));
+        CGContextDrawImage(srcCtx, CGRectMake(0, 0, side, side), blurred);
+        CGImageRelease(blurred);
+        CGFloat start = bands[index][0], end = bands[index][1], span = end - start;
+        size_t yStart = MAX(firstRow, (size_t)floor(start * (double)side));
+        for (size_t y = yStart; y < side; y++) {
+            CGFloat ny = ((CGFloat)y + 0.5) / (CGFloat)side;
+            if (ny <= start) continue;
+            float a;
+            if (ny >= end) {
+                a = 1.0f;
+            } else {
+                float p = (float)((ny - start) / span);
+                a = p * p * (3.0f - 2.0f * p);
+            }
+            const uint8_t *srcRow = src + y * side * 4;
+            uint8_t *dstRow = dst + y * side * 4;
+            if (a >= 0.9999f) {
+                for (size_t x = 0; x < side; x++) {
+                    const uint8_t *s = srcRow + x * 4;
+                    uint8_t *d = dstRow + x * 4;
+                    if (s[3] == 255) {
+                        d[0] = s[0]; d[1] = s[1]; d[2] = s[2]; d[3] = 255;
+                    } else {
+                        float inv = 1.0f - s[3] * (1.0f / 255.0f);
+                        d[0] = (uint8_t)MIN(255.0f, s[0] + d[0] * inv + 0.5f);
+                        d[1] = (uint8_t)MIN(255.0f, s[1] + d[1] * inv + 0.5f);
+                        d[2] = (uint8_t)MIN(255.0f, s[2] + d[2] * inv + 0.5f);
+                        d[3] = (uint8_t)MIN(255.0f, s[3] + d[3] * inv + 0.5f);
+                    }
+                }
+            } else {
+                for (size_t x = 0; x < side; x++) {
+                    const uint8_t *s = srcRow + x * 4;
+                    uint8_t *d = dstRow + x * 4;
+                    float inv = 1.0f - (s[3] * (1.0f / 255.0f)) * a;
+                    d[0] = (uint8_t)MIN(255.0f, s[0] * a + d[0] * inv + 0.5f);
+                    d[1] = (uint8_t)MIN(255.0f, s[1] * a + d[1] * inv + 0.5f);
+                    d[2] = (uint8_t)MIN(255.0f, s[2] * a + d[2] * inv + 0.5f);
+                    d[3] = (uint8_t)MIN(255.0f, s[3] * a + d[3] * inv + 0.5f);
+                }
+            }
+        }
+    }
+    CGContextRelease(srcCtx);
+    CGImageRef composite = CGBitmapContextCreateImage(dstCtx);
+    CGContextRelease(dstCtx);
+    if (!composite) return nil;
+    UIImage *result = [UIImage imageWithCGImage:composite scale:1 orientation:UIImageOrientationUp];
+    CGImageRelease(composite);
+    return result;
 }
 
 static void drawRamp(CGContextRef context, size_t height, CGFloat y0, CGFloat a0, CGFloat y1, CGFloat a1, CGBlendMode mode) {
@@ -355,8 +417,8 @@ static UIColor *tintOf(CGImageRef image, UIColor *surface) {
                 palette.edgeColor = edge;
                 if (request.fill) {
                     palette.fillBackgroundColor = fillBackgroundColorFromPixels(px);
-                    palette.fillBlurs = fillBlursOf(cg, smooth);
-                    if (!palette.fillBlurs) SGLog(@"redesign kit: could not render Fill background blur layers");
+                    palette.fillBlur = fillBlurOf(cg, smooth);
+                    if (!palette.fillBlur) SGLog(@"redesign kit: could not render Fill background blur layer");
                 }
                 CGFloat main[3];
                 UIColor *source = dominantIn(px, 0, 0, kSample, kSample, main)

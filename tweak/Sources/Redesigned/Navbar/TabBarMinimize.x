@@ -25,8 +25,15 @@ static BOOL inContainer(UIView *view) {
 
 static void scrolled(UIScrollView *scrollView) {
     if ((!scrollView.isTracking && !scrollView.isDecelerating) || scrollView == sg_other) return;
+    CGSize contentSize = scrollView.contentSize;
+    CGSize boundsSize = scrollView.bounds.size;
+    // Pure horizontal shelves (Home carousels, swipers) never scroll vertically; bail before responder walks.
+    if (contentSize.width > boundsSize.width + 1 && contentSize.height <= boundsSize.height + 1) return;
+    UIEdgeInsets inset = scrollView.adjustedContentInset;
+    BOOL currentlyMinimized = SGRTabBarMinimized();
+    if (!currentlyMinimized && contentSize.height + inset.top + inset.bottom <= boundsSize.height + 1) return;
     // Nothing playing: the pill has nothing to show, so the bar is never minimized (one already minimized can come back).
-    if (!SGRTabBarMinimized() && !SGRNowPlayingAvailable()) return;
+    if (!currentlyMinimized && !SGRNowPlayingAvailable()) return;
     CGFloat offset = scrollView.contentOffset.y;
     if (scrollView != sg_page) {
         if (!inContainer(scrollView)) {
@@ -34,18 +41,17 @@ static void scrolled(UIScrollView *scrollView) {
             return;
         }
         sg_page = scrollView;
-        sg_track = (SGRMinimizeTrack){offset, SGRTabBarMinimized()};
+        sg_track = (SGRMinimizeTrack){offset, currentlyMinimized};
     }
     // The bar changed some other way (a tab, the player): the scroll counts from here.
-    if (sg_track.minimized != SGRTabBarMinimized()) {
-        sg_track = (SGRMinimizeTrack){offset, SGRTabBarMinimized()};
+    if (sg_track.minimized != currentlyMinimized) {
+        sg_track = (SGRMinimizeTrack){offset, currentlyMinimized};
         sg_waitForTouch = YES;
     }
     if (scrollView.isTracking) sg_waitForTouch = NO;
-    UIEdgeInsets inset = scrollView.adjustedContentInset;
-    CGFloat top = -inset.top, bottom = scrollView.contentSize.height + inset.bottom - scrollView.bounds.size.height;
+    CGFloat top = -inset.top, bottom = contentSize.height + inset.bottom - boundsSize.height;
     BOOL minimized = SGRMinimizeStep(&sg_track, offset, top, bottom);
-    if (minimized == SGRTabBarMinimized() || (minimized && !SGEnabled(SGRKeyNavbarMinimize))) return;
+    if (minimized == currentlyMinimized || (minimized && !SGEnabled(SGRKeyNavbarMinimize))) return;
     if (minimized && sg_waitForTouch) return;
     SGRSetTabBarMinimized(minimized, YES);
 }

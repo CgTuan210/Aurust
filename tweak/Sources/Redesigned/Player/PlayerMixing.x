@@ -10,6 +10,7 @@
 #import "Core/SGCore.h"
 #import "Redesigned/Kit/SGRKit.h"
 #import "Shared/AutoMix/AutoMix.h"
+#import "Shared/Player/PlayerEvents.h"
 #import "Shared/Player/PlayerState.h"
 #import "Player.h"
 
@@ -19,8 +20,8 @@ static char kCapsuleKey;
 static UIView *sg_pill, *sg_rail, *sg_fill;
 static UILabel *sg_label;
 static BOOL sg_shown;
-static float sg_rate;
-static CADisplayLink *sg_link;
+static NSTimeInterval sg_interval;
+static NSTimer *sg_timer;
 
 static CGFloat pillHeight(void) {
     return ceil(sg_label.font.lineHeight) + kPadTop + kGap + kRailHeight + kPadBottom;
@@ -59,34 +60,63 @@ static void pillShow(BOOL shown) {
 }
 
 static void pillTearDown(void) {
-    [sg_link invalidate];
-    sg_link = nil;
-    sg_rate = 0;
+    [sg_timer invalidate];
+    sg_timer = nil;
+    sg_interval = 0;
 }
 
-static void pillTick(CADisplayLink *link) {
-    if (!sg_pill || sg_pill.superview == nil || sg_pill.window == nil) {
+static void pillTick(void);
+
+static void pillSchedule(NSTimeInterval interval) {
+    if (interval <= 0) {
+        pillTearDown();
+        return;
+    }
+    if (sg_timer && fabs(sg_interval - interval) < 0.01) return;
+    [sg_timer invalidate];
+    sg_interval = interval;
+    sg_timer = [NSTimer timerWithTimeInterval:interval repeats:YES block:^(NSTimer *timer) { pillTick(); }];
+    sg_timer.tolerance = interval >= 0.5 ? interval * 0.35 : 0.02;
+    [NSRunLoop.mainRunLoop addTimer:sg_timer forMode:NSRunLoopCommonModes];
+}
+
+static void pillTick(void) {
+    if (!sg_pill || sg_pill.superview == nil || sg_pill.window == nil
+        || UIApplication.sharedApplication.applicationState != UIApplicationStateActive) {
         pillTearDown();
         return;
     }
     SPTPlayerState *state = SGPlayerState();
-    double at = -1;
-    if (state) {
-        double reported = state.isPaused ? state.positionAsOfTimestamp : state.position;
-        if (isfinite(reported)) at = reported;
+    if (!state || state.isPaused) {
+        pillShow(NO);
+        pillTearDown();
+        return;
     }
+    double at = -1;
+    double reported = state.position;
+    if (isfinite(reported)) at = reported;
     double start = 0, end = 0;
     NSString *next = nil;
-    BOOL window = !SGRPlayerIsTransitioning() && SGAutoMixMixWindow(&start, &end, &next);
+    BOOL transitioning = SGRPlayerIsTransitioning();
+    BOOL window = !transitioning && SGAutoMixMixWindow(&start, &end, &next);
     double progress = window && end > start ? (at - start) / (end - start) : 0;
     BOOL mixing = window && at >= start - 0.4 && progress < 1.12;
     pillShow(mixing);
-    float rate = SGRReduceMotion() ? 4 : (mixing ? 10 : 2);
-    if (rate != sg_rate) {
-        sg_rate = rate;
-        sg_link.preferredFrameRateRange = CAFrameRateRangeMake(rate / 2, rate, rate);
+    if (transitioning) {
+        pillTearDown();
+        return;
     }
-    if (!mixing) return;
+    if (!window) {
+        // No crossfade planned on this track: stop polling until the next player state change.
+        pillTearDown();
+        return;
+    }
+    if (!mixing) {
+        double wait = start - 0.5 - at;
+        pillSchedule(wait > 2.0 ? MIN(2.0, wait * 0.5) : 0.4);
+        return;
+    }
+    pillSchedule(SGRReduceMotion() ? 0.25 : 0.1);
     NSMutableString *text = [NSMutableString stringWithString:@"Mixing"];
     if (next.length) [text appendString:[@" into " stringByAppendingString:next]];
     CGFloat most = MAX(sg_pill.superview.bounds.size.width - 24, kMinWidth);
@@ -105,12 +135,14 @@ static void pillTick(CADisplayLink *link) {
     }
 }
 
-@interface SGRMixDriver : NSObject
+@interface SGRMixWatcher : NSObject <SGPlayerStateObserver>
 @end
-@implementation SGRMixDriver
-- (void)tick:(CADisplayLink *)link { pillTick(link); }
+@implementation SGRMixWatcher
+- (void)playerStateDidChange:(SPTPlayerState *)state {
+    dispatch_async(dispatch_get_main_queue(), ^{ pillTick(); });
+}
 @end
-static SGRMixDriver *sg_driver;
+static SGRMixWatcher *sg_watcher;
 
 // The context line sits under the top row; the pill rides under its capsule. Any wide label but the
 // pill's own is the anchor, the way PlayerHeader.x finds the context line for its pill.
@@ -127,7 +159,6 @@ static UILabel *anchorIn(UIView *host) {
 
 static void pillMount(UIView *parent) {
     if (!parent) return;
-    if (!sg_driver) sg_driver = [SGRMixDriver new];
     if (!sg_pill) {
         sg_pill = [UIView new];
         sg_pill.userInteractionEnabled = NO;
@@ -168,12 +199,7 @@ static void pillMount(UIView *parent) {
     CGFloat measured = MIN(ceil([sg_label.text sizeWithAttributes:@{NSFontAttributeName: sg_label.font}].width) + 2 * kPadX, most);
     pillResize(MAX(measured, kMinWidth));
     pillPlace(parent, top);
-    if (!sg_link) {
-        sg_rate = SGRReduceMotion() ? 4 : 2;
-        sg_link = [CADisplayLink displayLinkWithTarget:sg_driver selector:@selector(tick:)];
-        [sg_link addToRunLoop:NSRunLoop.mainRunLoop forMode:NSRunLoopCommonModes];
-        sg_link.preferredFrameRateRange = CAFrameRateRangeMake(sg_rate / 2, sg_rate, sg_rate);
-    }
+    pillTick();
 }
 
 void SGRPlayerMixPillRelayout(UIViewController *unit) {
@@ -200,5 +226,24 @@ void SGRPlayerMixPillRelayout(UIViewController *unit) {
 %ctor {
     if (!SGRedesignedUI()) return;
     %init;
+    sg_watcher = [SGRMixWatcher new];
+    SGAddPlayerStateObserver(sg_watcher);
+    [NSNotificationCenter.defaultCenter addObserverForName:SGPlayerTransitionNotification object:nil
+                                                     queue:NSOperationQueue.mainQueue usingBlock:^(NSNotification *note) {
+        pillShow(NO);
+        pillTearDown();
+    }];
+    [NSNotificationCenter.defaultCenter addObserverForName:SGPlayerTransitionEndedNotification object:nil
+                                                     queue:NSOperationQueue.mainQueue usingBlock:^(NSNotification *note) {
+        pillTick();
+    }];
+    [NSNotificationCenter.defaultCenter addObserverForName:UIApplicationDidBecomeActiveNotification object:nil
+                                                     queue:NSOperationQueue.mainQueue usingBlock:^(NSNotification *note) {
+        pillTick();
+    }];
+    [NSNotificationCenter.defaultCenter addObserverForName:UIApplicationWillResignActiveNotification object:nil
+                                                     queue:NSOperationQueue.mainQueue usingBlock:^(NSNotification *note) {
+        pillTearDown();
+    }];
     SGRequireClasses(@[@"_TtC20NowPlaying_ModesImpl18HeaderElementsUnit"]);
 }

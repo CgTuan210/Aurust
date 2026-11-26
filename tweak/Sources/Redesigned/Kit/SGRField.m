@@ -28,27 +28,33 @@ static NSDictionary *noActions(void) {
     return none;
 }
 
-static CAGradientLayer *fillRamp(CGFloat start, CGFloat end, BOOL rising) {
-    NSMutableArray *locations = [NSMutableArray array];
-    NSMutableArray *colors = [NSMutableArray array];
-    void (^add)(CGFloat, CGFloat) = ^(CGFloat location, CGFloat alpha) {
-        [locations addObject:@(location)];
-        [colors addObject:(id)[UIColor colorWithWhite:1 alpha:alpha].CGColor];
-    };
-    add(0, rising ? 0 : 1);
+static NSArray<NSNumber *> *fillFadeLocations(void) {
+    static NSArray<NSNumber *> *locations;
+    static dispatch_once_t once;
+    dispatch_once(&once, ^{
+        NSMutableArray<NSNumber *> *stops = [NSMutableArray arrayWithCapacity:15];
+        [stops addObject:@0];
+        for (NSUInteger index = 0; index <= 12; index++) {
+            CGFloat progress = (CGFloat)index / 12;
+            [stops addObject:@(0.76 + (0.985 - 0.76) * progress)];
+        }
+        [stops addObject:@1];
+        locations = [stops copy];
+    });
+    return locations;
+}
+
+static NSArray *fillFadeColorsFor(CGColorRef base) {
+    UIColor *color = base ? [UIColor colorWithCGColor:base] : UIColor.blackColor;
+    NSMutableArray *colors = [NSMutableArray arrayWithCapacity:15];
+    [colors addObject:(id)[color colorWithAlphaComponent:0].CGColor];
     for (NSUInteger index = 0; index <= 12; index++) {
         CGFloat progress = (CGFloat)index / 12;
         CGFloat smooth = progress * progress * (3 - 2 * progress);
-        add(start + (end - start) * progress, rising ? smooth : 1 - smooth);
+        [colors addObject:(id)[color colorWithAlphaComponent:smooth].CGColor];
     }
-    add(1, rising ? 1 : 0);
-    CAGradientLayer *ramp = [CAGradientLayer layer];
-    ramp.actions = noActions();
-    ramp.colors = colors;
-    ramp.locations = locations;
-    ramp.startPoint = CGPointMake(0.5, 0);
-    ramp.endPoint = CGPointMake(0.5, 1);
-    return ramp;
+    [colors addObject:(id)[color colorWithAlphaComponent:1].CGColor];
+    return colors;
 }
 
 // How much of the material's blur the lyrics add over the Fill artwork: a little, not enough to lose the cover.
@@ -63,9 +69,8 @@ static const CGFloat kLyricsBlur = 0.3;
     CALayer *_backdrop;
     CALayer *_fillBackground;
     CALayer *_fill;
-    CAGradientLayer *_fillMask;
-    NSArray<CALayer *> *_fillBlurLayers;
-    NSArray<CAGradientLayer *> *_fillBlurMasks;
+    CALayer *_fillBlur;
+    CAGradientLayer *_fillFade;
     SGRFlowLayer *_flow;
     SGRFluidLayer *_fluidLayer;
     BOOL _watching;
@@ -91,6 +96,11 @@ static const CGFloat kLyricsBlur = 0.3;
         if (!field || !palette || generation != field->_generation) return;
         [field applyPalette:palette animated:animated && field.window != nil];
     }];
+}
+
+- (void)syncFillFadeColor {
+    // Read back _fillBackground.backgroundColor so AMOLED black overrides stay matched seamlessly.
+    _fillFade.colors = fillFadeColorsFor(_fillBackground.backgroundColor);
 }
 
 - (instancetype)initWithFrame:(CGRect)frame {
@@ -128,24 +138,23 @@ static const CGFloat kLyricsBlur = 0.3;
     _fill.contentsGravity = kCAGravityResizeAspectFill;
     _fill.masksToBounds = YES;
     _fill.hidden = YES;
-    _fillMask = fillRamp(0.76, 0.985, NO);
-    _fill.mask = _fillMask;
     [self.layer addSublayer:_fill];
-    static const CGFloat bands[4][2] = {{0.74, 0.84}, {0.79, 0.89}, {0.84, 0.94}, {0.89, 0.985}};
-    NSMutableArray<CALayer *> *blurLayers = [NSMutableArray arrayWithCapacity:4];
-    NSMutableArray<CAGradientLayer *> *blurMasks = [NSMutableArray arrayWithCapacity:4];
-    for (NSUInteger index = 0; index < 4; index++) {
-        CALayer *blur = [CALayer layer];
-        blur.actions = noActions();
-        blur.contentsGravity = kCAGravityResizeAspectFill;
-        CAGradientLayer *mask = fillRamp(bands[index][0], bands[index][1], YES);
-        blur.mask = mask;
-        [_fill addSublayer:blur];
-        [blurLayers addObject:blur];
-        [blurMasks addObject:mask];
-    }
-    _fillBlurLayers = blurLayers;
-    _fillBlurMasks = blurMasks;
+
+    // Progressive 4-band blur is pre-composited into one premultiplied RGBA8 texture (SGRPalette.m),
+    // and _fillFade blends the bottom edge into _fillBackground with zero offscreen CALayer.mask passes.
+    _fillBlur = [CALayer layer];
+    _fillBlur.actions = noActions();
+    _fillBlur.contentsGravity = kCAGravityResizeAspectFill;
+    [_fill addSublayer:_fillBlur];
+
+    _fillFade = [CAGradientLayer layer];
+    _fillFade.actions = noActions();
+    _fillFade.startPoint = CGPointMake(0.5, 0);
+    _fillFade.endPoint = CGPointMake(0.5, 1);
+    _fillFade.locations = fillFadeLocations();
+    _fillFade.hidden = YES;
+    [self syncFillFadeColor];
+    [self.layer addSublayer:_fillFade];
     return self;
 }
 
@@ -176,7 +185,7 @@ static const CGFloat kLyricsBlur = 0.3;
     [CATransaction setDisableActions:YES];
     _solid.frame = painted;
     _lyricsBlur.frame = painted;
-    if (_lyricsBlur) [self bringSubviewToFront:_lyricsBlur];
+    if (_lyricsBlur && self.subviews.lastObject != _lyricsBlur) [self bringSubviewToFront:_lyricsBlur];
     CGFloat height = windowHeight(self), total = MAX(1, painted.size.height);
     CGFloat from = height * kBlackFrom + bleed.top;
     CGFloat to = MAX(from + 1, height * kBlackTo + bleed.top);
@@ -184,13 +193,12 @@ static const CGFloat kLyricsBlur = 0.3;
     _black.locations = @[@(MIN(1, from / total)), @(MIN(1, to / total))];
     _backdrop.frame = CGRectMake(0, 0, bounds.size.width, [self backdropHeightNow]);
     CGFloat fillHeight = MIN(bounds.size.height, round(windowHeight(self) * 0.625));
+    CGRect fillFrame = CGRectMake(0, 0, bounds.size.width, fillHeight);
     _fillBackground.frame = painted;
-    _fill.frame = CGRectMake(0, 0, bounds.size.width, fillHeight);
-    _fillMask.frame = _fill.bounds;
-    for (NSUInteger index = 0; index < _fillBlurLayers.count; index++) {
-        _fillBlurLayers[index].frame = _fill.bounds;
-        _fillBlurMasks[index].frame = _fill.bounds;
-    }
+    _fill.frame = fillFrame;
+    _fillBlur.frame = _fill.bounds;
+    _fillBlur.contentsGravity = bounds.size.width > fillHeight ? kCAGravityResize : kCAGravityResizeAspectFill;
+    _fillFade.frame = fillFrame;
     _flow.frame = CGRectMake(0, 0, bounds.size.width, [self backdropHeightNow]);
     _fluidLayer.frame = painted;
     // The screen's part of it, so the copies turn about it and the shade ends at the screen's foot.
@@ -218,6 +226,7 @@ static const CGFloat kLyricsBlur = 0.3;
     _backdrop.hidden = fluid || _flows || _fills;
     _fillBackground.hidden = !_fills || fluid || _flows;
     _fill.hidden = fluid || _flows || !_fills || !_image.CGImage;
+    _fillFade.hidden = _fill.hidden;
     if (fluid && _image) [_fluidLayer setArtwork:_image animated:NO];
     [self watch];
     [self updateMotion];
@@ -238,6 +247,7 @@ static const CGFloat kLyricsBlur = 0.3;
     _backdrop.hidden = flows || _fluid || _fills;
     _fillBackground.hidden = !_fills || flows || _fluid;
     _fill.hidden = flows || _fluid || !_fills || !_image.CGImage;
+    _fillFade.hidden = _fill.hidden;
     if (!flows) _flow.hidden = YES;
     [self watch];
     [self updateMotion];
@@ -261,7 +271,7 @@ static const CGFloat kLyricsBlur = 0.3;
         _lyricsBlur.frame = self.bounds;
         [self addSubview:_lyricsBlur];
     }
-    [self bringSubviewToFront:_lyricsBlur];
+    if (self.subviews.lastObject != _lyricsBlur) [self bringSubviewToFront:_lyricsBlur];
     CGFloat intensity = on ? kLyricsBlur : 0;
     void (^apply)(void) = ^{
         UIViewPropertyAnimator *old = self->_lyricsBlurAnimator;
@@ -287,11 +297,18 @@ static const CGFloat kLyricsBlur = 0.3;
 - (void)setFills:(BOOL)fills {
     if (fills == _fills) return;
     _fills = fills;
-    if (fills) _fillBackground.backgroundColor = _color.CGColor;
+    if (fills) {
+        [CATransaction begin];
+        [CATransaction setDisableActions:YES];
+        _fillBackground.backgroundColor = _color.CGColor;
+        [self syncFillFadeColor];
+        [CATransaction commit];
+    }
     _black.hidden = fills || _fluid || _flows;
     _backdrop.hidden = fills || _fluid || _flows;
     _fillBackground.hidden = !fills || _fluid || _flows;
     _fill.hidden = !fills || _fluid || _flows || !_image.CGImage;
+    _fillFade.hidden = _fill.hidden;
     [self applyLyricsBlurAnimated:NO];
 }
 
@@ -330,7 +347,7 @@ static const CGFloat kLyricsBlur = 0.3;
     _watching = YES;
     NSNotificationCenter *center = NSNotificationCenter.defaultCenter;
     for (NSNotificationName name in @[UIApplicationDidBecomeActiveNotification, UIApplicationWillResignActiveNotification,
-                                      NSProcessInfoPowerStateDidChangeNotification, UIAccessibilityReduceMotionStatusDidChangeNotification]) {
+                                      UIAccessibilityReduceMotionStatusDidChangeNotification]) {
         [center addObserver:self selector:@selector(updateMotionSoon) name:name object:nil];
     }
     SGRObservePlayerTransition(self, ^(id owner) { [owner updateMotion]; }, ^(id owner) { [owner updateMotion]; });
@@ -340,7 +357,7 @@ static const CGFloat kLyricsBlur = 0.3;
     [NSNotificationCenter.defaultCenter removeObserver:self];
 }
 
-// The power state is reported off the main thread.
+// Accessibility notifications can arrive off the main thread.
 - (void)updateMotionSoon {
     dispatch_async(dispatch_get_main_queue(), ^{ [self updateMotion]; });
 }
@@ -348,9 +365,10 @@ static const CGFloat kLyricsBlur = 0.3;
 - (void)updateMotion {
     if (!_flow && !_fluidLayer) return;
     // A locked phone keeps the player in its window, so being in front counts as much as being in one.
+    // Both SGRFlow and SGRFluid are GPU-cached CoreAnimation layers (0% CPU) and automatically step down
+    // via SGPerformanceSmooth() under Low Power Mode, so they stay gliding smoothly even when throttled.
     BOOL front = UIApplication.sharedApplication.applicationState == UIApplicationStateActive;
-    BOOL may = self.window && front && !SGRPlayerIsTransitioning() && !SGRReduceMotion()
-            && !NSProcessInfo.processInfo.lowPowerModeEnabled && !_motionHeld;
+    BOOL may = self.window && front && !SGRPlayerIsTransitioning() && !SGRReduceMotion() && !_motionHeld;
     _fluidLayer.moving = may && _fluid;
     BOOL moving = may && _flows && !_flow.hidden;
     if (!_flow || moving == _flow.moving) return;
@@ -423,6 +441,7 @@ static const CGFloat kLyricsBlur = 0.3;
     _identity = [identity copy];
     _fill.contents = (__bridge id)image.CGImage;
     _fill.hidden = !_fills || _fluid || _flows || !image.CGImage;
+    _fillFade.hidden = _fill.hidden;
     [self readPaletteForImage:image animated:animated];
 }
 
@@ -455,13 +474,14 @@ static const CGFloat kLyricsBlur = 0.3;
         _backdrop.hidden = NO;
         [CATransaction commit];
     }
-    if (_fills && palette.fillBackgroundColor) _fillBackground.backgroundColor = palette.fillBackgroundColor.CGColor;
-    if (_fills && palette.fillBlurs.count == _fillBlurLayers.count) {
+    if (_fills) {
         [CATransaction begin];
         [CATransaction setDisableActions:YES];
-        for (NSUInteger index = 0; index < _fillBlurLayers.count; index++) {
-            _fillBlurLayers[index].contents = (__bridge id)palette.fillBlurs[index].CGImage;
+        if (palette.fillBackgroundColor) {
+            _fillBackground.backgroundColor = palette.fillBackgroundColor.CGColor;
+            [self syncFillFadeColor];
         }
+        if (palette.fillBlur) _fillBlur.contents = (__bridge id)palette.fillBlur.CGImage;
         [CATransaction commit];
     }
     [self applyColor:_preferred ?: palette.fieldColor animated:animated];

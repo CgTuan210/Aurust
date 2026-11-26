@@ -27,6 +27,11 @@ static BOOL sg_docked;
 static CGRect sg_dockRow;   // window coordinates
 static __weak UIView *sg_dockHost;
 static NSTimer *sg_progressTimer;
+static CGFloat sg_cachedProgressThickness = -1;
+static NSInteger sg_cachedRoundedArtwork = -1;
+static BOOL sg_hasTrackKnown, sg_hasTrack;
+static NSString *sg_coverCachePath;
+static UIImage *sg_coverCacheImage;
 
 CGRect SGRNowPlayingCardFrameIn(UIView *host, CGFloat *radius) {
     UIVisualEffectView *glass = sg_cardGlass;
@@ -67,14 +72,23 @@ static CGRect contentBounds(UIView *bar, UIView *target) {
 }
 
 static void roundView(UIView *view, CGFloat radius) {
-    view.layer.cornerRadius = radius;
-    view.layer.cornerCurve = kCACornerCurveContinuous;
+    CALayer *layer = view.layer;
+    if (layer.cornerRadius != radius) layer.cornerRadius = radius;
+    if (layer.cornerCurve != kCACornerCurveContinuous) layer.cornerCurve = kCACornerCurveContinuous;
 }
 
 static CGFloat progressThickness(void) {
-    NSUserDefaults *defaults = NSUserDefaults.standardUserDefaults;
-    return [defaults objectForKey:SGRKeyNowPlayingProgressThickness]
-        ? MIN(5, MAX(0, [defaults doubleForKey:SGRKeyNowPlayingProgressThickness])) : 2;
+    if (sg_cachedProgressThickness < 0) {
+        NSUserDefaults *defaults = NSUserDefaults.standardUserDefaults;
+        sg_cachedProgressThickness = [defaults objectForKey:SGRKeyNowPlayingProgressThickness]
+            ? MIN(5, MAX(0, [defaults doubleForKey:SGRKeyNowPlayingProgressThickness])) : 2;
+    }
+    return sg_cachedProgressThickness;
+}
+
+static BOOL roundedArtworkEnabled(void) {
+    if (sg_cachedRoundedArtwork < 0) sg_cachedRoundedArtwork = SGFlag(SGRKeyNowPlayingRoundedArtwork, NO) ? 1 : 0;
+    return sg_cachedRoundedArtwork != 0;
 }
 
 @interface SGRMiniProgressView : UIView
@@ -102,22 +116,41 @@ static CGFloat progressThickness(void) {
     return self;
 }
 
+- (void)applyFrames {
+    CGFloat horizontalInset = 8;
+    CGFloat width = MAX(0, self.bounds.size.width - horizontalInset * 2);
+    CGFloat fillY = self.bounds.size.height - 3 - _thickness / 2;
+    CGRect trackFrame = CGRectMake(horizontalInset, fillY, width, _thickness);
+    CGRect fillFrame = CGRectMake(horizontalInset, fillY, width * _progress, _thickness);
+    if (!CGRectEqualToRect(_track.frame, trackFrame)) _track.frame = trackFrame;
+    if (fabs(_fill.frame.size.width - fillFrame.size.width) >= 0.5
+        || _fill.frame.origin.x != fillFrame.origin.x
+        || _fill.frame.origin.y != fillFrame.origin.y
+        || _fill.frame.size.height != fillFrame.size.height) {
+        _fill.frame = fillFrame;
+    }
+    CGFloat radius = _thickness / 2;
+    if (_track.layer.cornerRadius != radius) _track.layer.cornerRadius = radius;
+    if (_fill.layer.cornerRadius != radius) _fill.layer.cornerRadius = radius;
+}
+
 - (void)setProgress:(CGFloat)progress thickness:(CGFloat)thickness {
-    _progress = MIN(1, MAX(0, progress));
-    _thickness = MIN(5, MAX(0, thickness));
-    self.hidden = _thickness <= 0;
-    [self setNeedsLayout];
+    CGFloat clamped = MIN(1, MAX(0, progress));
+    CGFloat thick = MIN(5, MAX(0, thickness));
+    BOOL hidden = thick <= 0;
+    if (self.hidden != hidden) self.hidden = hidden;
+    CGFloat width = MAX(0, self.bounds.size.width - 16);
+    BOOL widthChanged = fabs(clamped - _progress) * width >= 0.5;
+    BOOL thicknessChanged = fabs(thick - _thickness) >= 0.01;
+    if (!widthChanged && !thicknessChanged) return;
+    _progress = clamped;
+    _thickness = thick;
+    [self applyFrames];
 }
 
 - (void)layoutSubviews {
     [super layoutSubviews];
-    CGFloat horizontalInset = 8;
-    CGFloat width = MAX(0, self.bounds.size.width - horizontalInset * 2);
-    CGFloat fillY = self.bounds.size.height - 3 - _thickness / 2;
-    _track.frame = CGRectMake(horizontalInset, fillY, width, _thickness);
-    _fill.frame = CGRectMake(horizontalInset, fillY, width * _progress, _thickness);
-    _track.layer.cornerRadius = _thickness / 2;
-    _fill.layer.cornerRadius = _thickness / 2;
+    [self applyFrames];
 }
 @end
 
@@ -129,30 +162,73 @@ static BOOL isProgressLine(UIView *view, UIView *card) {
     return CGRectGetMaxY(frame) >= card.bounds.size.height - 14;
 }
 
+static void stopProgressTimer(void) {
+    [sg_progressTimer invalidate];
+    sg_progressTimer = nil;
+}
+
+static void updateMiniProgress(void);
+
+static void syncProgressTimer(void) {
+    UIView *custom = sg_miniProgressView;
+    SPTPlayerState *state = SGPlayerState();
+    BOOL active = UIApplication.sharedApplication.applicationState == UIApplicationStateActive;
+    BOOL shouldRun = custom && custom.window && active && !sg_docked && progressThickness() > 0
+        && SGPlayerTransitionEnds() <= 0 && state && !state.isPaused && state.duration > 0;
+    if (!shouldRun) {
+        stopProgressTimer();
+        return;
+    }
+    if (!sg_progressTimer) {
+        sg_progressTimer = [NSTimer timerWithTimeInterval:0.25 repeats:YES block:^(NSTimer *timer) {
+            updateMiniProgress();
+        }];
+        sg_progressTimer.tolerance = 0.08;
+        [NSRunLoop.mainRunLoop addTimer:sg_progressTimer forMode:NSRunLoopCommonModes];
+    }
+}
+
 static void updateMiniProgress(void) {
     UIView *line = sg_progressLine;
     UIView *custom = sg_miniProgressView;
-    if (!custom) return;
+    if (!custom) {
+        stopProgressTimer();
+        return;
+    }
     BOOL transitioning = !SGIsInside(custom, sgr_nowPlayingRoot) || SGPlayerTransitionEnds() > 0;
     if (line) {
         NSNumber *originalAlpha = objc_getAssociatedObject(line, &kProgressAlphaKey);
         BOOL hideOriginal = !transitioning && SGIsInside(line, sgr_nowPlayingRoot);
-        if (originalAlpha) line.alpha = hideOriginal ? 0 : originalAlpha.doubleValue;
+        if (originalAlpha) {
+            CGFloat target = hideOriginal ? 0 : originalAlpha.doubleValue;
+            if (line.alpha != target) line.alpha = target;
+        }
     }
-    custom.hidden = transitioning || progressThickness() <= 0;
-    if (transitioning) return;
+    CGFloat thick = progressThickness();
+    BOOL hideCustom = transitioning || thick <= 0;
+    if (custom.hidden != hideCustom) custom.hidden = hideCustom;
+    if (transitioning) {
+        stopProgressTimer();
+        return;
+    }
 
     SPTPlayerState *state = SGPlayerState();
     double position = state.isPaused ? state.positionAsOfTimestamp : state.position;
     CGFloat progress = state.duration > 0 ? (CGFloat)(position / state.duration) : 0;
-    [(SGRMiniProgressView *)custom setProgress:progress thickness:progressThickness()];
+    [(SGRMiniProgressView *)custom setProgress:progress thickness:thick];
+    if (!state || state.isPaused || !custom.window || sg_docked || thick <= 0
+        || UIApplication.sharedApplication.applicationState != UIApplicationStateActive) {
+        stopProgressTimer();
+    }
 }
 
 static void ensureMiniProgress(UIView *card) {
-    __block UIView *line = nil;
-    SGForEachView(card, ^(UIView *view) {
-        if (!line && isProgressLine(view, card)) line = view;
-    });
+    __block UIView *line = (sg_progressLine && [sg_progressLine isDescendantOfView:card]) ? sg_progressLine : nil;
+    if (!line) {
+        SGForEachView(card, ^(UIView *view) {
+            if (!line && isProgressLine(view, card)) line = view;
+        });
+    }
 
     if (sg_progressLine && sg_progressLine != line) {
         NSNumber *oldAlpha = objc_getAssociatedObject(sg_progressLine, &kProgressAlphaKey);
@@ -169,17 +245,13 @@ static void ensureMiniProgress(UIView *card) {
         objc_setAssociatedObject(card, &kProgressViewKey, progress, OBJC_ASSOCIATION_RETAIN_NONATOMIC);
     }
     if (progress.superview != card) [card addSubview:progress];
-    [card bringSubviewToFront:progress];
-    progress.frame = card.bounds;
-    progress.layer.cornerRadius = MIN(kCardRadius, card.bounds.size.height / 2);
+    else if (card.subviews.lastObject != progress) [card bringSubviewToFront:progress];
+    if (!CGRectEqualToRect(progress.frame, card.bounds)) progress.frame = card.bounds;
+    CGFloat radius = MIN(kCardRadius, card.bounds.size.height / 2);
+    if (progress.layer.cornerRadius != radius) progress.layer.cornerRadius = radius;
     sg_miniProgressView = progress;
     updateMiniProgress();
-    if (!sg_progressTimer) {
-        sg_progressTimer = [NSTimer timerWithTimeInterval:0.1 repeats:YES block:^(NSTimer *timer) {
-            updateMiniProgress();
-        }];
-        [NSRunLoop.mainRunLoop addTimer:sg_progressTimer forMode:NSRunLoopCommonModes];
-    }
+    syncProgressTimer();
 }
 
 static UIImage *customCardCover(void) {
@@ -189,7 +261,11 @@ static UIImage *customCardCover(void) {
     NSDictionary *metadata = [track respondsToSelector:@selector(metadata)] ? track.metadata : nil;
     NSString *albumURI = [metadata[@"album_uri"] isKindOfClass:NSString.class] ? metadata[@"album_uri"] : nil;
     NSString *path = SGTrackArtworkCoverPath(SGTrackEditFor(uri, albumURI));
-    return path.length ? [UIImage imageWithContentsOfFile:path] : nil;
+    if (!path.length) return nil;
+    if ([path isEqualToString:sg_coverCachePath]) return sg_coverCacheImage;
+    sg_coverCachePath = [path copy];
+    sg_coverCacheImage = [UIImage imageWithContentsOfFile:path];
+    return sg_coverCacheImage;
 }
 
 static void restyleCardContent(UIView *card) {
@@ -220,10 +296,10 @@ static void restyleCardContent(UIView *card) {
             }];
             if ([title isKindOfClass:UILabel.class]) {
                 // Identified title handled above.
-            } else if (titleText.length && labels.count > 0) labels.firstObject.text = titleText;
+            } else if (titleText.length && labels.count > 0 && ![labels.firstObject.text isEqualToString:titleText]) labels.firstObject.text = titleText;
             if ([artist isKindOfClass:UILabel.class]) {
                 // Identified artist handled above.
-            } else if (artistText.length && labels.count > 1) labels[1].text = artistText;
+            } else if (artistText.length && labels.count > 1 && ![labels[1].text isEqualToString:artistText]) labels[1].text = artistText;
         }
     }
     if (customCover) {
@@ -231,26 +307,34 @@ static void restyleCardContent(UIView *card) {
             if ([v isKindOfClass:UIImageView.class]) {
                 UIImageView *image = (UIImageView *)v;
                 if (CGRectGetWidth(image.bounds) >= 36 && CGRectGetWidth(image.bounds) <= 500) {
-                    image.image = customCover;
-                    image.contentMode = UIViewContentModeScaleAspectFill;
-                    image.clipsToBounds = YES;
+                    if (image.image != customCover) image.image = customCover;
+                    if (image.contentMode != UIViewContentModeScaleAspectFill) image.contentMode = UIViewContentModeScaleAspectFill;
+                    if (!image.clipsToBounds) image.clipsToBounds = YES;
                 }
             }
         });
     }
-    SGForEachView(card, ^(UIView *v) {
-        CGSize size = v.bounds.size;
-        BOOL square = size.width >= 36 && size.width <= 48 && fabs(size.width - size.height) < 1;
-        if (!square || v.layer.cornerRadius <= 0) return;
-        CGFloat radius = SGFlag(SGRKeyNowPlayingRoundedArtwork, NO) ? MIN(9, size.width * 0.22) : size.width / 2;
-        UIView *outer = v;
-        for (UIView *u = v; u && u != card && CGSizeEqualToSize(u.bounds.size, size); u = u.superview) {
-            roundView(u, radius);
-            u.clipsToBounds = YES;
-            outer = u;
-        }
-        sg_cardArtwork = outer;
-    });
+    BOOL rounded = roundedArtworkEnabled();
+    UIView *knownArt = sg_cardArtwork;
+    CGSize artSize = knownArt ? knownArt.bounds.size : CGSizeZero;
+    BOOL artMatches = knownArt && [knownArt isDescendantOfView:card]
+        && artSize.width >= 36 && artSize.width <= 48 && fabs(artSize.width - artSize.height) < 1
+        && fabs(knownArt.layer.cornerRadius - (rounded ? MIN(9, artSize.width * 0.22) : artSize.width / 2)) < 0.01;
+    if (!artMatches) {
+        SGForEachView(card, ^(UIView *v) {
+            CGSize size = v.bounds.size;
+            BOOL square = size.width >= 36 && size.width <= 48 && fabs(size.width - size.height) < 1;
+            if (!square || v.layer.cornerRadius <= 0) return;
+            CGFloat radius = rounded ? MIN(9, size.width * 0.22) : size.width / 2;
+            UIView *outer = v;
+            for (UIView *u = v; u && u != card && CGSizeEqualToSize(u.bounds.size, size); u = u.superview) {
+                roundView(u, radius);
+                if (!u.clipsToBounds) u.clipsToBounds = YES;
+                outer = u;
+            }
+            sg_cardArtwork = outer;
+        });
+    }
     ensureMiniProgress(card);
 }
 
@@ -330,7 +414,7 @@ static void togglePlayback(void);
     CGRect bounds = self.bounds;
     CGFloat side = bounds.size.height - 2 * kPillInset;
     _open.frame = bounds;
-    BOOL rounded = SGFlag(SGRKeyNowPlayingRoundedArtwork, NO);
+    BOOL rounded = roundedArtworkEnabled();
     CGFloat coverX = kPillInset + (rounded ? 2 : 0);
     _cover.frame = CGRectMake(coverX, kPillInset, side, side);
     _cover.layer.cornerRadius = rounded ? MIN(9, side * 0.22) : side / 2;
@@ -454,12 +538,16 @@ static UIImage *currentCover(void) {
 }
 
 static BOOL hasTrack(void) {
+    if (sg_hasTrackKnown) return sg_hasTrack;
     return SGPlayerState().track.trackTitle.length > 0;
 }
 
 void SGRNowPlayingBarRefresh(void) {
+    sg_cachedProgressThickness = -1;
+    sg_cachedRoundedArtwork = -1;
     if (sg_cardContent && SGIsInside(sg_cardContent, sgr_nowPlayingRoot)) restyleCardContent(sg_cardContent);
     updateMiniProgress();
+    syncProgressTimer();
     [sg_mini setNeedsLayout];
     [sg_mini layoutIfNeeded];
     refreshMini();
@@ -509,12 +597,17 @@ static NSString *sg_miniTrackURI;
         sg_miniTrackURI = [trackURI copy];
         sg_miniTrackGeneration++;
     }
+    BOOL trackPresent = state.track.trackTitle.length > 0;
     NSUInteger generation = sg_miniTrackGeneration;
     dispatch_async(dispatch_get_main_queue(), ^{
+        sg_hasTrackKnown = YES;
+        sg_hasTrack = trackPresent;
         if (refreshGeneration != sg_miniRefreshGeneration) return;
         // The queue ended with the bar minimized: the pill has nothing left to show, so the whole bar comes back.
         if (!hasTrack() && SGRTabBarMinimized()) SGRSetTabBarMinimized(NO, YES);
         refreshMini();
+        updateMiniProgress();
+        syncProgressTimer();
     });
     if (!trackChanged) return;
     // A new track's cover reaches the card a little after the state does.
@@ -537,6 +630,7 @@ static void applyDock(BOOL animated) {
 
     // Nothing is playing (or the player has not reported): there is no pill, and the card stays as Spotify has it.
     BOOL docked = sg_docked && hasTrack();
+    syncProgressTimer();
     SGRMiniPlayer *mini = miniPlayer();
     if (mini.superview != host) [host addSubview:mini];
     refreshMini();
@@ -610,7 +704,7 @@ static void styleNowPlayingBar(UIViewController *container) {
     UIVisualEffectView *glass = SGGlassFor(container.view, &kGlassKey);
     if (glass.overrideUserInterfaceStyle != UIUserInterfaceStyleDark) glass.overrideUserInterfaceStyle = UIUserInterfaceStyleDark;
     sg_cardGlass = glass;
-    glass.frame = frame;
+    if (!CGRectEqualToRect(glass.frame, frame)) glass.frame = frame;
     SGShapeGlass(glass, radius, NO);
     // A new track can change the card's size and brings its cover; the pill follows them.
     if (sg_docked) applyDock(NO);
@@ -641,15 +735,39 @@ static void styleNowPlayingBar(UIViewController *container) {
 %ctor {
     if (!SGRedesignedUI()) return;
     %init;
-    [NSNotificationCenter.defaultCenter addObserverForName:SGPlayerTransitionNotification
-                                                       object:nil
-                                                       queue:NSOperationQueue.mainQueue
-                                                  usingBlock:^(NSNotification *note) {
+    NSNotificationCenter *center = NSNotificationCenter.defaultCenter;
+    [center addObserverForName:SGPlayerTransitionNotification
+                        object:nil
+                         queue:NSOperationQueue.mainQueue
+                    usingBlock:^(NSNotification *note) {
         updateMiniProgress();
+        stopProgressTimer();
+    }];
+    [center addObserverForName:SGPlayerTransitionEndedNotification
+                        object:nil
+                         queue:NSOperationQueue.mainQueue
+                    usingBlock:^(NSNotification *note) {
+        updateMiniProgress();
+        syncProgressTimer();
+    }];
+    [center addObserverForName:UIApplicationDidBecomeActiveNotification
+                        object:nil
+                         queue:NSOperationQueue.mainQueue
+                    usingBlock:^(NSNotification *note) {
+        updateMiniProgress();
+        syncProgressTimer();
+    }];
+    [center addObserverForName:UIApplicationWillResignActiveNotification
+                        object:nil
+                         queue:NSOperationQueue.mainQueue
+                    usingBlock:^(NSNotification *note) {
+        stopProgressTimer();
     }];
     sg_miniWatcher = [SGRMiniPlayerWatcher new];
     SGAddPlayerStateObserver(sg_miniWatcher);
-    [NSNotificationCenter.defaultCenter addObserverForName:SGLocalFileEditsDidChangeNotification object:nil queue:NSOperationQueue.mainQueue usingBlock:^(NSNotification *note) {
+    [center addObserverForName:SGLocalFileEditsDidChangeNotification object:nil queue:NSOperationQueue.mainQueue usingBlock:^(NSNotification *note) {
+        sg_coverCachePath = nil;
+        sg_coverCacheImage = nil;
         refreshMini();
         dispatch_async(dispatch_get_main_queue(), ^{ refreshMini(); });
     }];

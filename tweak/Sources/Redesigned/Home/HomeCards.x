@@ -50,8 +50,11 @@ static void backing(UIView *card, BOOL large) {
 
 // A large card's text sits a little in from the glass card's edges, rather than on them.
 static const CGFloat kTextInset = 10;
+static char kShiftedKey;
 
 static void centerText(UIView *card, UIView *holder, BOOL large) {
+    if (!large && !objc_getAssociatedObject(card, &kShiftedKey)) return;
+    objc_setAssociatedObject(card, &kShiftedKey, large ? @YES : nil, OBJC_ASSOCIATION_RETAIN_NONATOMIC);
     SGForEachView(card, ^(UIView *v) {
         if (![v isKindOfClass:UILabel.class] || [v isDescendantOfView:holder]) return;
         CGFloat shift = large ? kTextInset : 0;
@@ -78,9 +81,10 @@ static void roundCover(UIView *card) {
 
 static void calmDJ(UIView *card) {
     for (UIView *sub in card.subviews) {
+        if (sub.alpha == 0 && sub.accessibilityElementsHidden) continue;
         NSString *name = NSStringFromClass(sub.class);
         if (![name containsString:@"TranscriptView"] && ![name containsString:@"BetaBadge"]) continue;
-        if (sub.alpha != 0) sub.alpha = 0;
+        sub.alpha = 0;
         sub.accessibilityElementsHidden = YES;
         SGForEachView(sub, ^(UIView *v) {
             if ([v isKindOfClass:UILabel.class]) SGRSuppress(v);

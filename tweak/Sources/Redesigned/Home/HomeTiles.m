@@ -7,7 +7,14 @@ static const CGFloat kInset = 6, kCoverRadius = 11, kPillRadius = 18;
 // The original look, when the Home page switch is off.
 static const CGFloat kPlainInset = 5, kPlainCoverRadius = 4;
 
-static char kSurfaceKey, kImageKey, kShownKey;
+static char kSurfaceKey, kImageKey, kShownKey, kSheenKey, kObservedTileKey;
+
+@interface SGRWeakTileRef : NSObject
+@property (nonatomic, weak) UIView *tile;
+@end
+
+@implementation SGRWeakTileRef
+@end
 
 // Tints already worked out, by the image object while it lives (main thread only).
 static NSMapTable<UIImage *, UIColor *> *tints(void) {
@@ -19,6 +26,12 @@ static NSMapTable<UIImage *, UIColor *> *tints(void) {
 static UIColor *untinted(void) {
     static UIColor *color;
     if (!color) color = SGRElevated(UIColor.blackColor);
+    return color;
+}
+
+static UIColor *tileBorderColor(void) {
+    static UIColor *color;
+    if (!color) color = [UIColor colorWithWhite:1 alpha:0.22];
     return color;
 }
 
@@ -50,6 +63,18 @@ static UIView *surfaceIn(UIView *tile, UIView *fill) {
         surface.userInteractionEnabled = NO;
         surface.accessibilityElementsHidden = YES;
         surface.backgroundColor = untinted();
+        if (SGRHomeGlassStyle()) {
+            CALayer *layer = surface.layer;
+            layer.cornerCurve = kCACornerCurveContinuous;
+            layer.masksToBounds = YES;
+            layer.borderWidth = 1;
+            layer.borderColor = tileBorderColor().CGColor;
+            CAGradientLayer *sheen = [CAGradientLayer layer];
+            sheen.colors = @[(id)[UIColor colorWithWhite:1 alpha:0.20].CGColor, (id)[UIColor colorWithWhite:1 alpha:0.02].CGColor,
+                             (id)[UIColor colorWithWhite:0 alpha:0.18].CGColor];
+            [layer addSublayer:sheen];
+            objc_setAssociatedObject(surface, &kSheenKey, sheen, OBJC_ASSOCIATION_RETAIN_NONATOMIC);
+        }
         objc_setAssociatedObject(tile, &kSurfaceKey, surface, OBJC_ASSOCIATION_RETAIN_NONATOMIC);
     }
     if (surface.superview != tile) {
@@ -61,19 +86,8 @@ static UIView *surfaceIn(UIView *tile, UIView *fill) {
     CALayer *layer = surface.layer;
     CGFloat radius = MIN(kPillRadius, tile.bounds.size.height / 2);
     if (layer.cornerRadius != radius) layer.cornerRadius = radius;
-    if (layer.cornerCurve != kCACornerCurveContinuous) layer.cornerCurve = kCACornerCurveContinuous;
-    layer.masksToBounds = YES;
-    layer.borderWidth = 1;
-    layer.borderColor = [UIColor colorWithWhite:1 alpha:0.22].CGColor;
-    CAGradientLayer *sheen = nil;
-    for (CALayer *sub in layer.sublayers) if ([sub isKindOfClass:CAGradientLayer.class]) sheen = (CAGradientLayer *)sub;
-    if (!sheen) {
-        sheen = [CAGradientLayer layer];
-        sheen.colors = @[(id)[UIColor colorWithWhite:1 alpha:0.20].CGColor, (id)[UIColor colorWithWhite:1 alpha:0.02].CGColor,
-                         (id)[UIColor colorWithWhite:0 alpha:0.18].CGColor];
-        [layer addSublayer:sheen];
-    }
-    if (!CGRectEqualToRect(sheen.frame, surface.bounds)) sheen.frame = surface.bounds;
+    CAGradientLayer *sheen = objc_getAssociatedObject(surface, &kSheenKey);
+    if (sheen && !CGRectEqualToRect(sheen.frame, surface.bounds)) sheen.frame = surface.bounds;
     return surface;
 }
 
@@ -122,8 +136,7 @@ static void tint(UIView *tile, UIView *surface, UIColor *color, BOOL animated) {
     SGRAnimate(SGRMotionFade, ^{ surface.backgroundColor = color; }, nil);
 }
 
-static void refresh(UIView *tile) {
-    SGRTileParts *parts = partsOf(tile);
+static void refresh(UIView *tile, SGRTileParts *parts) {
     UIImageView *cover = parts.cover;
     UIView *square = parts.square;
     if (!cover || !square || square.bounds.size.width < 20 || tile.bounds.size.width <= square.bounds.size.width) return;
@@ -157,14 +170,22 @@ static void refresh(UIView *tile) {
 
 void SGRHomeStyleTile(UIView *tile) {
     CFTimeInterval began = SGRHomeProbeBegin();
-    UIImageView *cover = partsOf(tile).cover;
+    SGRTileParts *parts = partsOf(tile);
+    UIImageView *cover = parts.cover;
     if (!cover) return;
-    __weak UIView *weakTile = tile;
-    // The block is replaced on every pass, so a cover taken into another tile tells the tile it is in now.
-    SGRObserveImage(cover, ^(UIImageView *view) {
-        UIView *strongTile = weakTile;
-        if (strongTile && [view isDescendantOfView:strongTile]) refresh(strongTile);
-    });
-    refresh(tile);
+    SGRWeakTileRef *ref = objc_getAssociatedObject(cover, &kObservedTileKey);
+    if (!ref || ref.tile != tile) {
+        if (!ref) {
+            ref = [SGRWeakTileRef new];
+            objc_setAssociatedObject(cover, &kObservedTileKey, ref, OBJC_ASSOCIATION_RETAIN_NONATOMIC);
+        }
+        ref.tile = tile;
+        __weak UIView *weakTile = tile;
+        SGRObserveImage(cover, ^(UIImageView *view) {
+            UIView *strongTile = weakTile;
+            if (strongTile && [view isDescendantOfView:strongTile]) refresh(strongTile, partsOf(strongTile));
+        });
+    }
+    refresh(tile, parts);
     SGRHomeProbeEnd(SGRHomeProbeTiles, began);
 }

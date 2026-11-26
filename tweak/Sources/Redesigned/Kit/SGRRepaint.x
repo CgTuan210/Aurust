@@ -10,20 +10,34 @@ __weak UIView *sgr_artistRoot = nil;
 
 %hook CALayer
 - (void)setBackgroundColor:(CGColorRef)color {
-    if (color && (sgr_nowPlayingRoot || sgr_lyricsPageRoot || sgr_playlistRoot || sgr_albumRoot || sgr_artistRoot)) {
-        UIView *view = (UIView *)self.delegate;
-        if ([view isKindOfClass:UIView.class] && view.layer == self && !SGKeepsColor(view)) {
-            if (SGIsInside(view, sgr_nowPlayingRoot)) {
-                if (SGLooksLikeCard(view, color) && sgr_nowPlayingCard != view) {
-                    sgr_nowPlayingCard = view;
-                    UIView *bar = sgr_nowPlayingRoot;
-                    dispatch_async(dispatch_get_main_queue(), ^{ [bar.superview setNeedsLayout]; });
+    if (color) {
+        UIView *npb = sgr_nowPlayingRoot;
+        UIView *lyrics = sgr_lyricsPageRoot;
+        UIView *playlist = sgr_playlistRoot;
+        UIView *album = sgr_albumRoot;
+        UIView *artist = sgr_artistRoot;
+        if (npb || lyrics || playlist || album || artist) {
+            UIView *view = (UIView *)self.delegate;
+            if ([view isKindOfClass:UIView.class] && view.layer == self && !SGKeepsColor(view)) {
+                for (UIView *v = view; v; v = v.superview) {
+                    if ([v isKindOfClass:UIVisualEffectView.class]) break;
+                    if (v == npb) {
+                        if (SGLooksLikeCard(view, color) && sgr_nowPlayingCard != view) {
+                            sgr_nowPlayingCard = view;
+                            dispatch_async(dispatch_get_main_queue(), ^{ [npb.superview setNeedsLayout]; });
+                        }
+                        color = NULL;
+                        break;
+                    }
+                    if (v == lyrics) {
+                        color = NULL;
+                        break;
+                    }
+                    if (v == playlist || v == album || v == artist) {
+                        if (SGIsBaseSurface(color)) color = NULL;
+                        break;
+                    }
                 }
-                color = NULL;
-            } else if (SGIsInside(view, sgr_lyricsPageRoot)) {
-                color = NULL;
-            } else if (SGIsBaseSurface(color) && (SGIsInside(view, sgr_playlistRoot) || SGIsInside(view, sgr_albumRoot) || SGIsInside(view, sgr_artistRoot))) {
-                color = NULL;
             }
         }
     }

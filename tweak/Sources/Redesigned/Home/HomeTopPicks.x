@@ -21,7 +21,7 @@ static const NSInteger kGradientDefault = 0, kGradientCustom = 1, kGradientSong 
 // Room added under a large card's text, so a long title or an author's name stays inside the glass card.
 static const CGFloat kTextRoom = 24;
 static NSNotificationName const kGradientSettingsDidChange = @"spotifyglass.redesign.home.gradientSettingsDidChange";
-static char kAuraKey, kAuraShownKey, kAuraImageKey, kAuraTriesKey;
+static char kAuraKey, kAuraShownKey, kAuraImageKey, kAuraTriesKey, kAuraColorKey, kAuraOffsetKey, kHomeShelfKey;
 static char kLargeKey, kNaturalKey, kWrappedKey, kWidthKey, kAskedKey;
 static __weak UICollectionView *sg_homeList;
 static UIColor *sg_topPickColor;
@@ -35,8 +35,23 @@ static NSInteger sg_topIndex = NSIntegerMax;
 static NSIndexPath *sg_shortcutsPath, *sg_topPath;
 static NSIndexPath *sg_headingPath;
 static __weak UICollectionViewLayout *sg_pageLayout;
+static NSDictionary<NSIndexPath *, NSValue *> *sg_cachedSwappedFrames;
+static BOOL sg_swappedFramesValid;
+static NSInteger sg_cachedGradientMode = -1;
 static _Thread_local BOOL sg_reordering;
 static void stripBase(UIView *cell, NSUInteger depth);
+
+static BOOL homeTopPicksEnabled(void) {
+    static BOOL enabled;
+    static dispatch_once_t once;
+    dispatch_once(&once, ^{ enabled = SGFlag(SGRKeyHomeTopPicks, NO); });
+    return enabled;
+}
+
+static void invalidateSwappedFrames(void) {
+    sg_cachedSwappedFrames = nil;
+    sg_swappedFramesValid = NO;
+}
 
 // The layout a wrapped provider belongs to, set once the layout is made.
 @interface SGRLayoutBox : NSObject
@@ -70,12 +85,12 @@ static UICollectionViewCompositionalLayout *boxed(UICollectionViewCompositionalL
 %hook UICollectionViewCompositionalLayout
 - (instancetype)initWithSectionProvider:(UICollectionViewCompositionalLayoutSectionProvider)provider
                           configuration:(UICollectionViewCompositionalLayoutConfiguration *)configuration {
-    if (!provider || !SGFlag(SGRKeyHomeTopPicks, NO)) return %orig;
+    if (!provider || !homeTopPicksEnabled()) return %orig;
     SGRLayoutBox *box = [SGRLayoutBox new];
     return boxed(%orig(wrapped(provider, box), configuration), box);
 }
 - (instancetype)initWithSectionProvider:(UICollectionViewCompositionalLayoutSectionProvider)provider {
-    if (!provider || !SGFlag(SGRKeyHomeTopPicks, NO)) return %orig;
+    if (!provider || !homeTopPicksEnabled()) return %orig;
     SGRLayoutBox *box = [SGRLayoutBox new];
     return boxed(%orig(wrapped(provider, box)), box);
 }
@@ -118,14 +133,15 @@ static NSArray<NSIndexPath *> *pathsBetween(UICollectionView *list, NSIndexPath 
 }
 
 static NSDictionary<NSIndexPath *, NSValue *> *swappedFrames(UICollectionViewLayout *layout) {
-    if (!SGRHomeGlassStyle() || !SGFlag(SGRKeyHomeTopPicks, NO)) return nil;
+    if (!SGRHomeGlassStyle() || !homeTopPicksEnabled()) return nil;
+    if (sg_pageLayout != layout) return nil;
+    if (sg_swappedFramesValid) return sg_cachedSwappedFrames;
     UICollectionView *list = layout.collectionView;
     if (!list || !sg_shortcutsPath || !sg_topPath || [sg_shortcutsPath compare:sg_topPath] != NSOrderedAscending) return nil;
-    if (sg_pageLayout != layout) return nil;
     NSArray<NSIndexPath *> *paths = pathsBetween(list, sg_shortcutsPath, sg_topPath);
     if (paths.count < 2) return nil;
     sg_reordering = YES;
-    NSMutableArray<UICollectionViewLayoutAttributes *> *items = [NSMutableArray array];
+    NSMutableArray<UICollectionViewLayoutAttributes *> *items = [NSMutableArray arrayWithCapacity:paths.count];
     for (NSIndexPath *path in paths) {
         UICollectionViewLayoutAttributes *a = [layout layoutAttributesForItemAtIndexPath:path];
         if (!a) { sg_reordering = NO; return nil; }
@@ -133,8 +149,8 @@ static NSDictionary<NSIndexPath *, NSValue *> *swappedFrames(UICollectionViewLay
     }
     sg_reordering = NO;
     UICollectionViewLayoutAttributes *shortcuts = items.firstObject, *top = items.lastObject;
-    NSMutableArray<UICollectionViewLayoutAttributes *> *order = [NSMutableArray array];
-    NSMutableArray<UICollectionViewLayoutAttributes *> *rest = [NSMutableArray array];
+    NSMutableArray<UICollectionViewLayoutAttributes *> *order = [NSMutableArray arrayWithCapacity:items.count];
+    NSMutableArray<UICollectionViewLayoutAttributes *> *rest = [NSMutableArray arrayWithCapacity:items.count];
     UICollectionViewLayoutAttributes *heading = nil;
     for (NSUInteger i = 1; i + 1 < items.count; i++) {
         // A short cell right before the shelf is its heading.
@@ -149,7 +165,7 @@ static NSDictionary<NSIndexPath *, NSValue *> *swappedFrames(UICollectionViewLay
     // The top shelf's heading is gone; the room it had goes between the shelf and the shortcuts.
     CGFloat spare = heading ? heading.frame.size.height + gap : 0;
     CGFloat y = CGRectGetMinY(shortcuts.frame);
-    NSMutableDictionary *frames = [NSMutableDictionary dictionary];
+    NSMutableDictionary *frames = [NSMutableDictionary dictionaryWithCapacity:items.count];
     for (UICollectionViewLayoutAttributes *a in order) {
         CGRect frame = a.frame;
         frame.origin.y = y;
@@ -162,12 +178,24 @@ static NSDictionary<NSIndexPath *, NSValue *> *swappedFrames(UICollectionViewLay
         gone.origin.y = CGRectGetMinY(shortcuts.frame);
         frames[heading.indexPath] = [NSValue valueWithCGRect:gone];
     }
+    sg_cachedSwappedFrames = frames;
+    sg_swappedFramesValid = YES;
     return frames;
 }
 
 %hook UICollectionViewCompositionalLayout
+- (void)invalidateLayout {
+    if ((UICollectionViewLayout *)self == sg_pageLayout) invalidateSwappedFrames();
+    %orig;
+}
+
+- (void)invalidateLayoutWithContext:(UICollectionViewLayoutInvalidationContext *)context {
+    if ((UICollectionViewLayout *)self == sg_pageLayout) invalidateSwappedFrames();
+    %orig;
+}
+
 - (NSArray<UICollectionViewLayoutAttributes *> *)layoutAttributesForElementsInRect:(CGRect)rect {
-    if (sg_reordering || !SGFlag(SGRKeyHomeTopPicks, NO) || sg_pageLayout != (UICollectionViewLayout *)self) return %orig;
+    if (sg_reordering || !homeTopPicksEnabled() || sg_pageLayout != (UICollectionViewLayout *)self) return %orig;
     NSDictionary *frames = swappedFrames((UICollectionViewLayout *)self);
     if (!frames) return %orig;
 
@@ -209,7 +237,7 @@ static NSDictionary<NSIndexPath *, NSValue *> *swappedFrames(UICollectionViewLay
 
 - (UICollectionViewLayoutAttributes *)layoutAttributesForItemAtIndexPath:(NSIndexPath *)path {
     UICollectionViewLayoutAttributes *a = %orig;
-    if (sg_reordering || !SGFlag(SGRKeyHomeTopPicks, NO) || sg_pageLayout != (UICollectionViewLayout *)self || !a) return a;
+    if (sg_reordering || !homeTopPicksEnabled() || sg_pageLayout != (UICollectionViewLayout *)self || !a) return a;
     NSValue *moved = swappedFrames((UICollectionViewLayout *)self)[path];
     if (!moved) return a;
     a = [a copy];
@@ -244,13 +272,15 @@ static NSDictionary<NSIndexPath *, NSValue *> *swappedFrames(UICollectionViewLay
         sg_shortcutsPath = sg_topPath = nil;
         sg_headingPath = nil;
         sg_topIndex = NSIntegerMax;
+        invalidateSwappedFrames();
     }
-    if (!SGFlag(SGRKeyHomeTopPicks, NO)) return result;
+    if (!homeTopPicksEnabled()) return result;
     if (root && ![root isKindOfClass:shelf ?: NSObject.class] && [root isKindOfClass:UICollectionView.class]) {
         UIView *first = ((UICollectionView *)root).visibleCells.firstObject;
         if ([NSStringFromClass(object_getClass(first.subviews.firstObject)) containsString:@"Home_AnchorsAndShortcutsKit"]
             && ![attributes.indexPath isEqual:sg_shortcutsPath]) {
             sg_shortcutsPath = attributes.indexPath;
+            invalidateSwappedFrames();
             [sg_pageLayout invalidateLayout];
         }
     }
@@ -264,9 +294,10 @@ static NSDictionary<NSIndexPath *, NSValue *> *swappedFrames(UICollectionViewLay
     if (index < sg_topIndex) sg_topIndex = index;
     if (index == sg_topIndex && ![attributes.indexPath isEqual:sg_topPath]) {
         sg_topPath = attributes.indexPath;
+        invalidateSwappedFrames();
         [sg_pageLayout invalidateLayout];
     }
-    BOOL large = SGFlag(SGRKeyHomeTopPicks, NO) && index == sg_topIndex;
+    BOOL large = homeTopPicksEnabled() && index == sg_topIndex;
     BOOL was = objc_getAssociatedObject(layout, &kLargeKey) != nil;
     // The shelf's height as Spotify sizes it, from a measuring before it was large.
     if (!was) objc_setAssociatedObject(layout, &kNaturalKey, @(result.size.height), OBJC_ASSOCIATION_RETAIN_NONATOMIC);
@@ -313,8 +344,11 @@ SGModRow *SGRHomeTopPicksRow(void) {
 }
 
 static NSInteger gradientMode(void) {
-    NSInteger mode = SGInt(SGRKeyHomeGradientMode, kGradientDefault);
-    return mode >= kGradientDefault && mode <= kGradientSong ? mode : kGradientDefault;
+    if (sg_cachedGradientMode < 0) {
+        NSInteger mode = SGInt(SGRKeyHomeGradientMode, kGradientDefault);
+        sg_cachedGradientMode = mode >= kGradientDefault && mode <= kGradientSong ? mode : kGradientDefault;
+    }
+    return sg_cachedGradientMode;
 }
 
 static UIColor *gradientColorFromRGB(NSInteger rgb) {
@@ -363,6 +397,7 @@ static void refreshSongAura(void) {
 }
 
 void SGRHomeGradientRefresh(void) {
+    sg_cachedGradientMode = -1;
     sg_songAuraIdentity = nil;
     sg_songAuraRequest++;
     NSInteger mode = gradientMode();
@@ -455,6 +490,8 @@ static void pokeCards(UICollectionView *shelf) {
 // The page's gradient: behind the list, in the colour of the cover at the shelf's leading edge, so it changes as the
 // large shelf is scrolled. Cells lose their base-surface backgrounds so it shows through.
 static UICollectionView *pageListOf(UIView *shelf) {
+    UICollectionView *known = sg_homeList;
+    if (known && known != shelf && [shelf isDescendantOfView:known]) return known;
     for (UIView *v = shelf.superview; v; v = v.superview) {
         if ([v isKindOfClass:UICollectionView.class] && v != shelf) return (UICollectionView *)v;
     }
@@ -462,9 +499,15 @@ static UICollectionView *pageListOf(UIView *shelf) {
 }
 
 static BOOL isHomeShelf(UICollectionView *shelf) {
+    NSNumber *cached = objc_getAssociatedObject(shelf, &kHomeShelfKey);
+    if (cached) return cached.boolValue;
     for (UIView *view = shelf; view; view = view.superview) {
-        if ([NSStringFromClass(object_getClass(view)) containsString:@"Home_EvoPageImpl13HomeStructure"]) return YES;
+        if ([NSStringFromClass(object_getClass(view)) containsString:@"Home_EvoPageImpl13HomeStructure"]) {
+            objc_setAssociatedObject(shelf, &kHomeShelfKey, @YES, OBJC_ASSOCIATION_RETAIN_NONATOMIC);
+            return YES;
+        }
     }
+    if (shelf.window) objc_setAssociatedObject(shelf, &kHomeShelfKey, @NO, OBJC_ASSOCIATION_RETAIN_NONATOMIC);
     return NO;
 }
 
@@ -484,6 +527,7 @@ static void stripBase(UIView *cell, NSUInteger depth) {
 }
 
 static void paintAura(UICollectionView *list, UIColor *color) {
+    if (!list || !color) return;
     CAGradientLayer *gradient = objc_getAssociatedObject(list, &kAuraKey);
     if (!gradient) {
         gradient = [CAGradientLayer layer];
@@ -503,6 +547,9 @@ static void paintAura(UICollectionView *list, UIColor *color) {
     [CATransaction setDisableActions:YES];
     if (!CGRectEqualToRect(gradient.frame, frame)) gradient.frame = frame;
     [CATransaction commit];
+    UIColor *previous = objc_getAssociatedObject(gradient, &kAuraColorKey);
+    if (previous && CGColorEqualToColor(previous.CGColor, color.CGColor)) return;
+    objc_setAssociatedObject(gradient, &kAuraColorKey, color, OBJC_ASSOCIATION_RETAIN_NONATOMIC);
     NSArray *to = @[(id)color.CGColor, (id)color.CGColor, (id)[color colorWithAlphaComponent:0].CGColor];
     CABasicAnimation *fade = [CABasicAnimation animationWithKeyPath:@"colors"];
     fade.fromValue = gradient.presentationLayer.colors ?: gradient.colors;
@@ -514,13 +561,20 @@ static void paintAura(UICollectionView *list, UIColor *color) {
 
 static void followAlbum(UICollectionView *shelf) {
     if (!isHomeShelf(shelf)) return;
-    if (SGFlag(SGRKeyHomeTopPicks, NO)) pokeCards(shelf);
+    if (homeTopPicksEnabled() && objc_getAssociatedObject(shelf.collectionViewLayout, &kLargeKey)) pokeCards(shelf);
     if (!SGRHomeGlassStyle()) return;
     UICollectionView *list = pageListOf(shelf);
     if (!list) return;
+    BOOL listChanged = sg_homeList != list;
     sg_homeList = list;
-    if (gradientMode() == kGradientCustom) {
-        SGRHomeGradientRefresh();
+    NSInteger mode = gradientMode();
+    if (mode == kGradientCustom) {
+        if (listChanged || !objc_getAssociatedObject(list, &kAuraKey)) SGRHomeGradientRefresh();
+        return;
+    }
+    NSNumber *lastOffset = objc_getAssociatedObject(shelf, &kAuraOffsetKey);
+    if (!listChanged && objc_getAssociatedObject(shelf, &kAuraShownKey) && lastOffset
+        && fabs(shelf.contentOffset.x - lastOffset.doubleValue) < 2.0) {
         return;
     }
     UIView *lead = nil;
@@ -542,6 +596,7 @@ static void followAlbum(UICollectionView *shelf) {
         }
         return;
     }
+    objc_setAssociatedObject(shelf, &kAuraOffsetKey, @(shelf.contentOffset.x), OBJC_ASSOCIATION_RETAIN_NONATOMIC);
     if (objc_getAssociatedObject(shelf, &kAuraShownKey) == image) return;
     objc_setAssociatedObject(shelf, &kAuraShownKey, image, OBJC_ASSOCIATION_RETAIN_NONATOMIC);
     __weak UICollectionView *weakShelf = shelf;
@@ -551,9 +606,9 @@ static void followAlbum(UICollectionView *shelf) {
         if (!s || !palette || objc_getAssociatedObject(s, &kAuraShownKey) != image) return;
         UICollectionView *page = pageListOf(s);
         sg_topPickColor = liftAuraColor(palette.fieldColor);
-        NSInteger mode = gradientMode();
-        if (page && mode == kGradientDefault) paintAura(page, sg_topPickColor);
-        else if (mode == kGradientSong) refreshSongAura();
+        NSInteger activeMode = gradientMode();
+        if (page && activeMode == kGradientDefault) paintAura(page, sg_topPickColor);
+        else if (activeMode == kGradientSong) refreshSongAura();
     }];
 }
 
@@ -580,7 +635,7 @@ static void followAlbum(UICollectionView *shelf) {
 %end
 
 %ctor {
-    if (!SGRedesignedUI() || (!SGRHomeGlassStyle() && !SGFlag(SGRKeyHomeTopPicks, NO))) return;
+    if (!SGRedesignedUI() || (!SGRHomeGlassStyle() && !homeTopPicksEnabled())) return;
     [NSNotificationCenter.defaultCenter addObserverForName:SGRNowPlayingArtworkDidChangeNotification object:nil
                                                       queue:NSOperationQueue.mainQueue usingBlock:^(NSNotification *note) {
         if (gradientMode() == kGradientSong) refreshSongAura();

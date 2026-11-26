@@ -35,6 +35,9 @@ static CAGradientLayer *newRainbow(void) {
     gradient.colors = rainbow();
     gradient.startPoint = CGPointMake(0.5, 0.5);
     gradient.endPoint = CGPointMake(0.5, 0);
+    // Smooth rotating color wheel: rasterizing once avoids re-evaluating 3 conic shaders every frame.
+    gradient.shouldRasterize = YES;
+    gradient.rasterizationScale = 1.0;
     return gradient;
 }
 
@@ -156,6 +159,7 @@ static CAShapeLayer *newStroke(CGFloat width) {
     CGFloat x = self.on ? self.bounds.size.width - kKnobInset - width : kKnobInset;
     _knob.frame = CGRectMake(x, kKnobInset, width, side);
     _knob.layer.cornerRadius = side / 2;
+    _knob.layer.shadowPath = [UIBezierPath bezierPathWithRoundedRect:_knob.bounds cornerRadius:side / 2].CGPath;
 }
 
 - (void)paint {
@@ -186,6 +190,7 @@ static CAShapeLayer *newStroke(CGFloat width) {
         turn.duration = kTurn;
         turn.repeatCount = HUGE_VALF;
         turn.removedOnCompletion = NO;
+        turn.preferredFrameRateRange = CAFrameRateRangeMake(20, 60, 30);
         [colors addAnimation:turn forKey:kTurnKey];
     }
 }

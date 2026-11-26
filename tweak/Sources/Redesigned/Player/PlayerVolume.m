@@ -83,8 +83,10 @@ static UIImageView *glyph(NSString *symbol) {
     _value = AVAudioSession.sharedInstance.outputVolume;
     [AVAudioSession.sharedInstance addObserver:self forKeyPath:@"outputVolume" options:NSKeyValueObservingOptionNew
                                        context:&kSessionContext];
-    [NSNotificationCenter.defaultCenter addObserver:self selector:@selector(refreshFromSystem)
+    [NSNotificationCenter.defaultCenter addObserver:self selector:@selector(appDidBecomeActive)
                                                name:UIApplicationDidBecomeActiveNotification object:nil];
+    [NSNotificationCenter.defaultCenter addObserver:self selector:@selector(appWillResignActive)
+                                               name:UIApplicationWillResignActiveNotification object:nil];
 
     self.isAccessibilityElement = YES;
     self.accessibilityLabel = @"Volume";
@@ -112,6 +114,10 @@ static UIImageView *glyph(NSString *symbol) {
         for (UIView *view in _system.subviews) {
             if (![view isKindOfClass:UISlider.class]) continue;
             _systemSlider = (UISlider *)view;
+            // Hide the system slider's visible artwork once when discovered.
+            _systemSlider.thumbTintColor = UIColor.clearColor;
+            _systemSlider.minimumTrackTintColor = UIColor.clearColor;
+            _systemSlider.maximumTrackTintColor = UIColor.clearColor;
             [_systemSlider addObserver:self
                             forKeyPath:@"value"
                                options:NSKeyValueObservingOptionNew
@@ -119,12 +125,6 @@ static UIImageView *glyph(NSString *symbol) {
             break;
         }
     }
-
-    // Hide the system slider's visible artwork.
-    _systemSlider.thumbTintColor = UIColor.clearColor;
-    _systemSlider.minimumTrackTintColor = UIColor.clearColor;
-    _systemSlider.maximumTrackTintColor = UIColor.clearColor;
-
     return _systemSlider;
 }
 
@@ -207,6 +207,25 @@ static UIImageView *glyph(NSString *symbol) {
     [self syncStyle];
 }
 
+- (void)startPollIfNeeded {
+    if (_poll || !self.window || UIApplication.sharedApplication.applicationState != UIApplicationStateActive) return;
+    __weak SGRVolumeRow *weakSelf = self;
+    // KVO on outputVolume and _systemSlider.value handles instant updates; this 1s fallback only catches remote Connect drift.
+    _poll = [NSTimer timerWithTimeInterval:1.0 repeats:YES block:^(NSTimer *timer) { [weakSelf refreshFromSystem]; }];
+    _poll.tolerance = 0.35;
+    [NSRunLoop.mainRunLoop addTimer:_poll forMode:NSRunLoopCommonModes];
+}
+
+- (void)appDidBecomeActive {
+    [self refreshFromSystem];
+    [self startPollIfNeeded];
+}
+
+- (void)appWillResignActive {
+    [_poll invalidate];
+    _poll = nil;
+}
+
 - (void)didMoveToWindow {
     [super didMoveToWindow];
     if (!self.window) {
@@ -217,11 +236,7 @@ static UIImageView *glyph(NSString *symbol) {
     }
     [self systemSlider];
     [self refreshFromSystem];
-    if (_poll) return;
-    __weak SGRVolumeRow *weakSelf = self;
-    _poll = [NSTimer timerWithTimeInterval:0.25 repeats:YES block:^(NSTimer *timer) { [weakSelf refreshFromSystem]; }];
-    _poll.tolerance = 0.1;
-    [NSRunLoop.mainRunLoop addTimer:_poll forMode:NSRunLoopCommonModes];
+    [self startPollIfNeeded];
 }
 
 // Prevent the player from stealing volume swipe gesture.

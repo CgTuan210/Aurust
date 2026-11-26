@@ -1,28 +1,12 @@
-<p align="center">
-  <img src="docs/image.png" width="1000" alt="">
-</p>
+<h1 align="center">Aurust</h1>
 
-<h1 align="center">taurus.</h1>
-
-<p align="center">The Open-Sourced, Human-Made, Awesome Tweak for Spotify that grants Free Premium and Liquid Glass UI.</p>
-<p align="center">https://taurus.lat</p>
+<p align="center">A performance-focused fork of the Liquid Glass Spotify tweak for iOS — built for silky-smooth animations and low CPU usage even on older or throttled devices.</p>
 
 <p align="center">
-  <img src="https://img.shields.io/badge/iOS-000000?style=for-the-badge&logo=ios&logoColor=white" alt="iOS">
   <img src="https://img.shields.io/badge/Spotify-9.1.90-1ED760?style=for-the-badge&logo=spotify&logoColor=white" alt="Spotify 9.1.90">
-  <img src="https://img.shields.io/badge/Objective--C-3A95E3?style=for-the-badge&logo=apple&logoColor=white" alt="Objective-C">
-  <img src="https://img.shields.io/badge/GitHub_Actions-2671E5?style=for-the-badge&logo=githubactions&logoColor=white" alt="GitHub Actions">
-</p>
-<p align="center">
-  <img src="docs/banner.png" width="1200" height="630" alt="">
-</p>
-
-
-<p align="center">
-  <a href="https://gitlab.com/taurustweak/taurus">GitLab</a> ·  
-  <a href="#build-it">Build it</a> ·
-  <a href="docs/tweaks.md">Hack on it</a> ·
-  <a href="#install-it">Install it</a>
+  <img src="https://img.shields.io/badge/iOS-16.1%2B%20%7C%2026%2B%20Glass-000000?style=for-the-badge&logo=apple&logoColor=white" alt="iOS 16.1+ / 26+">
+  <img src="https://img.shields.io/badge/Objective--C%20%2F%20Logos-3A95E3?style=for-the-badge&logo=apple&logoColor=white" alt="Objective-C / Logos">
+  <img src="https://img.shields.io/badge/Codemagic-Build%20IPA-2671E5?style=for-the-badge&logo=codemagic&logoColor=white" alt="Codemagic">
 </p>
 
 <p align="center">
@@ -33,96 +17,84 @@
   <img src="docs/screenshots/live-activity.webp" width="16%" alt="Live Activity on the lock screen">
 </p>
 
-#### [We have moved the source code to GitLab!](https://gitlab.com/taurustweak/taurus)
+---
 
-A no-jailbreak Theos tweak that rebuilds Spotify for iOS in Liquid Glass, injected into your own
-decrypted IPA and signed with your own certificate.
+## Overview
 
-Built and tested on **Spotify 9.1.90** — use that version's IPA. The mod hooks Spotify's own classes,
-which change between releases, so another version may build and then break.
+**Aurust** is a fork of the open-source Liquid Glass Spotify tweak (Theos + Logos), injected into your own decrypted Spotify IPA and signed with your own certificate — no jailbreak required.
 
-| | |
-|---|---|
-| The redesign | **iOS 26+** |
-| Legacy look | iOS 16.1+ |
-| Live Activity | iOS 17+ |
+### What Aurust focuses on
 
-The redesign is `UIGlassEffect`, which only exists from iOS 26. Below that the Redesigned UI switch
-is greyed out and the mod runs Spotify's own screens with everything else it adds on top. Both live
-in Settings → Mod Settings.
+- **Low-CPU Lock Screen Lyrics & Live Activity**: adaptive timeline scheduling tuned for minimal background CPU while staying responsive on fast / rap lyrics.
+- **Zero-compromise GPU rendering (Smooth Mode)**: off-main-thread SIMD blur baking for lyrics, rasterized radial/conic shaders, LUT-based palette extraction, and single-pass pre-composited Fill blur (eliminating nested offscreen `CALayer.mask` passes).
+- **Smooth UI motion under CPU throttling**: cached Home compositional layouts, deduplicated gradient animations, event-driven Now Playing & Mixing timers (0 Hz when idle), pure CoreAnimation GPU wordmark in Mod Settings, and Flow/Fluid backgrounds that keep gliding smoothly even in Low Power Mode.
 
-## Install it
+---
 
-A full installation guide is on our [Discord](https://discord.gg/9uXz5pgz6Z)
+## Compatibility
 
-Each
-[release](https://github.com/samj-exe/taurus/releases) carries the tweak's `.ipa`, install this `.ipa` file with any sideloader, such as SideStore or Feather. You do not need to build to project if you do not wish to.
+Built and verified on **Spotify `9.1.90`** — use a clean decrypted **`9.1.90`** IPA. Spotify's internal Swift classes and view hierarchies change between updates, and the **Downloads** engine only activates on `9.1.90`.
 
-[Add the release source to SideStore, Feather, and Most Signing Apps](https://altdirect.app/?url=https://taurus.lat/repo), or manually add the ESign source (https://taurus.lat/esign) in ESign or any ESign compatible app.
+| Feature | Requirement |
+| --- | --- |
+| Target Spotify IPA | **9.1.90** (decrypted) |
+| Redesigned UI (Liquid Glass) | **iOS 26+** |
+| Native UI (tweaked stock screens) | **iOS 16.1+** |
+| Live Activity | **iOS 17+** |
 
-## Build it
+Below iOS 26, the **Redesigned UI** switch is unavailable and the mod automatically runs in **Native UI** mode with all shared features active. Both are configured in **Settings → Mod Settings**.
 
-Bring a decrypted **Spotify 9.1.90** IPA; you get an unsigned
-`Taurus-<mod version>.ipa` to sign with SideStore, Feather or any certificate signer. Each
-[release](https://github.com/samj-exe/taurus/releases) also carries the tweak's `.deb`.
+---
 
-#### Build with GitHub Actions (recommended)
+## Build
 
-Go to the [GitHub Import Page](https://github.com/new/import) and import the [GitLab Repo](https://gitlab.com/taurustweak/taurus) - wait for it to finish importing.
+You provide a clean decrypted **Spotify `9.1.90`** `.ipa`; the pipeline compiles the tweak and outputs an unsigned `out/Aurust-<version>-unsigned.ipa` with the default **Spotify** app name and **Bundle ID** (`com.spotify.client`).
 
-Enable Actions, run **Build IPA from your own Spotify IPA**. It takes a direct link to
-your decrypted `.ipa` and hands the built IPA back as a workflow artifact. No Mac needed; the link is
-masked in the log and the result stays in your fork.
+### 1. Build with Codemagic (Recommended — no Mac needed)
 
-#### Build on a Mac
+This repo includes [codemagic.yaml](codemagic.yaml) ready for macOS M2 builds:
 
-Theos in `~/theos` and Xcode with an iPhoneOS 26+ SDK (`xcode-select` it). An SDK in `~/theos/sdks`
-alone builds too, but without the Live Activity. Then:
+1. Connect this repository in Codemagic.
+2. Click **Start new build** on branch `stable`.
+3. Select workflow **`Build Unsigned IPA (Aurust)`**.
+4. Leave `ipa_url` at its default (or paste a direct download link to your own decrypted Spotify `9.1.90` IPA — Catbox, GitHub Release, R2, or Dropbox `?dl=1`).
+5. Download the resulting `Aurust-<version>-unsigned.ipa` from **Artifacts**.
 
-    brew install make ldid dpkg zsign ideviceinstaller libimobiledevice
-    uv tool install "cyan @ git+https://github.com/asdfzxcvbn/pyzule-rw"
+> Need only the tweak package? Run the **`Build Tweak Only (.deb)`** workflow instead.
 
-Put the decrypted `.ipa` in `ipa/`, then:
+### 2. Build with GitHub Actions
 
-    make release    # out/Taurus-<version>.ipa, ready to sign
-    make install    # the same, signed with your certificate and pushed over USB
+Enable Actions on the repository and trigger **Build IPA from your own Spotify IPA** with a direct link to your decrypted Spotify `9.1.90` `.ipa`.
 
-`make install` reads `SIGN_P12`, `SIGN_PROFILE` and `SIGN_P12_PASSWORD` from `.signing.env`; copy
-`.signing.env.example` and fill it in.
+### 3. Build locally on a Mac
 
-The first build spends a minute reading Spotify's flags out of your IPA. `make flags` regenerates it.
+Requires Theos in `~/theos`, Xcode with an iPhoneOS 26+ SDK, and CLI tools:
 
-### Signing
+```bash
+brew install make ldid dpkg zsign ideviceinstaller libimobiledevice
+uv tool install "cyan @ git+https://github.com/asdfzxcvbn/pyzule-rw"
+```
 
-Sign with a bundle id matching your certificate's App ID. If it doesn't match, the app still works
-but tapping the player on the lock screen won't open it — and it tells you on first launch which id
-to use. In Feather, copy the App ID into **Identifier** and leave **PPQ protection** off; AltStore,
-SideStore and Sideloadly get this right on their own.
+Drop your decrypted Spotify `9.1.90` `.ipa` into `ipa/`, then run:
 
-The app keeps Spotify's bundle id, so it installs over the real Spotify.
+```bash
+make release    # outputs unsigned IPA into out/
+make install    # signs using .signing.env and pushes over USB
+```
 
-## Contributing
+---
 
-Pull requests are welcome. The pull request's description has a box for agreeing to the
-[Contributor License Agreement](CLA.md), which gives the project's owner the rights to the
-contribution; it is ticked once, before the first pull request is merged.
+## Signing & Installation
 
-## Star history
+Sign the unsigned IPA with **SideStore**, **AltStore**, **Feather**, **Sideloadly**, or **ESign**:
 
-<a href="https://star-history.com/#samj-exe/taurus&Date">
-  <picture>
-    <source media="(prefers-color-scheme: dark)" srcset="https://api.star-history.com/svg?repos=samj-exe/taurus&type=Date&theme=dark">
-    <img src="https://api.star-history.com/svg?repos=samj-exe/taurus&type=Date" alt="Star history chart">
-  </picture>
-</a>
+- Keep the bundle ID matched to your signing certificate's App ID so tapping the player from the Lock Screen / Live Activity opens Spotify properly.
+- In **Feather**, copy your certificate's App ID into **Identifier** and leave **PPQ protection** off. AltStore, SideStore, and Sideloadly handle this automatically.
+
+---
 
 ## Credits
 
-chroma.pw/spoti.pw by darkk
-
-[cyan](https://github.com/asdfzxcvbn/pyzule-rw) injects, [Theos](https://theos.dev) builds, and
-[FLEX](https://github.com/FLEXTool/FLEX), as hopeless's AutoFLEX build in `vendor/`, is the inspector
-the view trees are read through.
-
-All modified and distributed code from chroma.pw is licensed under GPL-3.0, no code under PolyForm Strict License 1.0.0 is distributed. 
-Not affiliated with Spotify.
+- Forked from upstream **Taurus** and **spoti.pw / chroma.pw**.
+- Powered by [Theos](https://theos.dev), [cyan](https://github.com/asdfzxcvbn/pyzule-rw), and [FLEX](https://github.com/FLEXTool/FLEX) (for view-tree inspection).
+- Not affiliated with Spotify.

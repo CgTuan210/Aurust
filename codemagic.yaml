@@ -5,43 +5,14 @@ workflows:
     max_build_duration: 45
     inputs:
       ipa_url:
-        description: "Direct link tải file Spotify IPA đã decrypt (Catbox / GitHub Release / R2 / Dropbox ?dl=1)"
+        description: "Link Spotify IPA gốc đã decrypt (để nguyên mặc định để build luôn)"
         type: string
         default: "https://files.catbox.moe/qa5eyg.ipa"
-      app_name:
-        description: "Đổi tên hiển thị của app (để trống = giữ nguyên Spotify)"
-        type: string
-        default: ""
-      bundle_id:
-        description: "Custom Bundle ID (để trống = giữ com.spotify.client để không lỗi mở từ Lock Screen)"
-        type: string
-        default: ""
-      with_safari:
-        description: "Nhúng tiện ích Safari 'Open in Spotify'"
-        type: boolean
-        default: true
-      with_downloads:
-        description: "Vá thêm tính năng Downloads (tự bỏ qua nếu khác phiên bản Spotify hỗ trợ)"
-        type: boolean
-        default: true
-      with_flex:
-        description: "Nhúng thêm bộ công cụ debug giao diện FLEX"
-        type: boolean
-        default: false
     environment:
       xcode: latest
       vars:
         THEOS: $CM_BUILD_DIR/theos
         INPUT_IPA_URL: "${{ inputs.ipa_url }}"
-        INPUT_APP_NAME: "${{ inputs.app_name }}"
-        INPUT_BUNDLE_ID: "${{ inputs.bundle_id }}"
-        INPUT_WITH_SAFARI: "${{ inputs.with_safari }}"
-        INPUT_WITH_DOWNLOADS: "${{ inputs.with_downloads }}"
-        INPUT_WITH_FLEX: "${{ inputs.with_flex }}"
-      # Nếu muốn giấu link IPA riêng tư trong App settings -> Environment variables (group: spotify),
-      # bỏ dấu # ở 2 dòng dưới sau khi đã tạo group `spotify` trên web Codemagic:
-      # groups:
-      #   - spotify
     scripts:
       - name: Verify Xcode 26+ & iPhoneOS SDK
         script: |
@@ -93,7 +64,7 @@ workflows:
           set -euo pipefail
           TARGET_URL="${IPA_URL:-$INPUT_IPA_URL}"
           if [ -z "$TARGET_URL" ]; then
-            echo "Error: Chưa có link IPA. Nhập ipa_url khi bấm Start new build hoặc đặt biến IPA_URL." >&2
+            echo "Error: Chưa có link IPA. Để nguyên link mặc định hoặc dán direct link Spotify IPA đã decrypt." >&2
             exit 1
           fi
           mkdir -p ipa
@@ -119,14 +90,7 @@ workflows:
           MOD_VER="$(tr -d '[:space:]' < version.txt 2>/dev/null || echo '0.0.0')"
           OUT_IPA="out/Aurust-${MOD_VER}-unsigned.ipa"
 
-          ARGS=(ipa/spotify.ipa -o "$OUT_IPA")
-          [ "$INPUT_WITH_FLEX" = "true" ] || ARGS+=(--no-flex)
-          [ "$INPUT_WITH_SAFARI" = "true" ] || ARGS+=(--no-safari)
-          [ "$INPUT_WITH_DOWNLOADS" = "true" ] || ARGS+=(--no-downloads)
-          [ -n "$INPUT_APP_NAME" ] && ARGS+=(--name "$INPUT_APP_NAME")
-
-          export BUNDLE_ID="${BUNDLE_ID:-$INPUT_BUNDLE_ID}"
-          bash scripts/pipeline.sh "${ARGS[@]}"
+          bash scripts/pipeline.sh ipa/spotify.ipa -o "$OUT_IPA" --no-flex
 
           ls -lh "$OUT_IPA" tweak/packages/*.deb
           shasum -a 256 "$OUT_IPA"
@@ -141,7 +105,7 @@ workflows:
     max_build_duration: 30
     inputs:
       ipa_url:
-        description: "Direct link tải file Spotify IPA đã decrypt (để trích bảng cờ remote-config)"
+        description: "Link Spotify IPA gốc đã decrypt (để nguyên mặc định để build luôn)"
         type: string
         default: "https://files.catbox.moe/qa5eyg.ipa"
     environment:

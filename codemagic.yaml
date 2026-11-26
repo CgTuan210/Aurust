@@ -19,7 +19,7 @@ workflows:
           set -euo pipefail
           xcodebuild -version
           SDK_LIST="$(ls -d "$(xcode-select -p)"/Platforms/iPhoneOS.platform/Developer/SDKs/iPhoneOS*.sdk 2>/dev/null || true)"
-          if ! printf '%s\n' "$SDK_LIST" | grep -qE 'iPhoneOS(2[6-9]|[3-9][0-9])\.'; then
+          if ! printf '%s\n' "$SDK_LIST" | grep -E 'iPhoneOS(2[6-9]|[3-9][0-9])\.' >/dev/null; then
             CANDIDATE="$(ls -d /Applications/Xcode-26*.app /Applications/Xcode-27*.app /Applications/Xcode*.app 2>/dev/null | sort -V | tail -n 1 || true)"
             if [ -n "$CANDIDATE" ]; then
               sudo xcode-select -s "$CANDIDATE/Contents/Developer"
@@ -79,10 +79,20 @@ workflows:
               exit 1
               ;;
           esac
-          unzip -Z1 ipa/spotify.ipa | grep -qE '^Payload/[^/]+\.app/Info\.plist$' || {
-            echo "Error: File ZIP không chứa Payload/*.app/Info.plist hợp lệ." >&2
-            exit 1
-          }
+          python3 - <<'PY'
+          import plistlib, re, sys, zipfile
+          with zipfile.ZipFile("ipa/spotify.ipa") as zf:
+              plists = [n for n in zf.namelist() if re.match(r"^Payload/[^/]+\.app/Info\.plist$", n)]
+              if not plists:
+                  print("Error: File ZIP không chứa Payload/*.app/Info.plist hợp lệ.", file=sys.stderr)
+                  print("Top entries:", zf.namelist()[:15], file=sys.stderr)
+                  sys.exit(1)
+              info = plistlib.loads(zf.read(plists[0]))
+              name = info.get("CFBundleDisplayName") or info.get("CFBundleName") or "?"
+              ver = info.get("CFBundleShortVersionString") or "?"
+              bid = info.get("CFBundleIdentifier") or "?"
+              print(f"==> Verified IPA: {name} {ver} ({bid}) [{plists[0]}]")
+          PY
 
       - name: Build & Inject Unsigned IPA
         script: |

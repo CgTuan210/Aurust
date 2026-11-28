@@ -3,8 +3,10 @@
 #import "SGRPalette.h"
 #import "SGRTokens.h"
 
-static const size_t kSample = 64;      // the artwork shrunk to this square before its colours are read
-static const size_t kEdgeRows = 10;    // the bottom rows of it averaged into the edge colour
+enum {
+    kSample = 64,      // the artwork shrunk to this square before its colours are read
+    kEdgeRows = 10,    // the bottom rows of it averaged into the edge colour
+};
 static const CGFloat kMaxLuminance = 0.07;
 // A field's OKLab lightness ceiling (0.30 with Increase Contrast), and its chroma lift and cap.
 static const CGFloat kFieldLightness = 0.34, kFieldLightnessContrast = 0.30;

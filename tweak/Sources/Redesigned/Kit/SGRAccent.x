@@ -91,6 +91,7 @@ static inline int matchGreen(CGFloat *r, CGFloat *g, CGFloat *b) {
 static CGColorRef swappedCopy(CGColorRef color) {
     if (!color || CFGetTypeID(color) != sgr_colorTypeID || CGColorGetNumberOfComponents(color) != 4) return NULL;
     const CGFloat *c = CGColorGetComponents(color);
+    if (!c) return NULL;
     CGFloat r = c[0], g = c[1], b = c[2];
     int idx = matchGreen(&r, &g, &b);
     if (idx < 0) return NULL;

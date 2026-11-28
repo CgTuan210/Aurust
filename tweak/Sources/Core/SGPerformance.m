@@ -38,6 +38,15 @@ static void refreshDynamicStates(void) {
         memory_order_relaxed);
 }
 
+static BOOL computeSmooth(void) {
+    int choice = atomic_load_explicit(&sg_cachedChoice, memory_order_relaxed);
+    if (choice == SGSmoothModeOn) return YES;
+    if (choice == SGSmoothModeOff) return NO;
+    return sg_olderHardware
+        || atomic_load_explicit(&sg_lowPower, memory_order_relaxed)
+        || atomic_load_explicit(&sg_thermalHot, memory_order_relaxed);
+}
+
 static void ensurePerformanceInitialized(void) {
     static dispatch_once_t once;
     dispatch_once(&once, ^{
@@ -51,9 +60,9 @@ static void ensurePerformanceInitialized(void) {
         for (NSNotificationName name in @[NSProcessInfoPowerStateDidChangeNotification,
                                           NSProcessInfoThermalStateDidChangeNotification]) {
             [center addObserverForName:name object:nil queue:nil usingBlock:^(NSNotification *note) {
-                BOOL before = SGPerformanceSmooth();
+                BOOL before = computeSmooth();
                 refreshDynamicStates();
-                BOOL after = SGPerformanceSmooth();
+                BOOL after = computeSmooth();
                 if (before != after) {
                     dispatch_async(dispatch_get_main_queue(), ^{
                         [NSNotificationCenter.defaultCenter postNotificationName:SGPerformanceDidChangeNotification object:nil];
@@ -61,7 +70,7 @@ static void ensurePerformanceInitialized(void) {
                 }
             }];
         }
-        SGLog(@"performance: olderHardware=%d smooth=%d (choice=%ld)", sg_olderHardware, SGPerformanceSmooth(), (long)stored);
+        SGLog(@"performance: olderHardware=%d smooth=%d (choice=%ld)", sg_olderHardware, computeSmooth(), (long)stored);
     });
 }
 
@@ -72,12 +81,7 @@ BOOL SGDeviceIsOlderHardware(void) {
 
 BOOL SGPerformanceSmooth(void) {
     ensurePerformanceInitialized();
-    int choice = atomic_load_explicit(&sg_cachedChoice, memory_order_relaxed);
-    if (choice == SGSmoothModeOn) return YES;
-    if (choice == SGSmoothModeOff) return NO;
-    return sg_olderHardware
-        || atomic_load_explicit(&sg_lowPower, memory_order_relaxed)
-        || atomic_load_explicit(&sg_thermalHot, memory_order_relaxed);
+    return computeSmooth();
 }
 
 void SGSetSmoothModeChoice(SGSmoothModeChoice choice) {

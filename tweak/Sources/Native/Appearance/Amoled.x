@@ -9,6 +9,7 @@ static inline BOOL isBaseGrey(CGColorRef color) {
     if (!color || CFGetTypeID(color) != sg_colorTypeID) return NO;
     size_t n = CGColorGetNumberOfComponents(color);
     const CGFloat *c = CGColorGetComponents(color);
+    if (!c) return NO;
     if (n == 2) return c[0] > 0.01 && c[0] <= 0.10;
     if (n < 3) return NO;
     return c[0] > 0.01 && c[0] <= 0.10 && fabs(c[0] - c[1]) < 0.02 && fabs(c[1] - c[2]) < 0.02;

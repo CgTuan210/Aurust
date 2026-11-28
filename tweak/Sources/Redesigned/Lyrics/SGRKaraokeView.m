@@ -176,11 +176,22 @@ static UIView *letterHost(NSString *text, UIFont *font, CGRect bounds, NSArray<U
 - (void)settle;
 @end
 
+static NSDictionary *wordMaskNoActions(void) {
+    static NSDictionary *none;
+    static dispatch_once_t once;
+    dispatch_once(&once, ^{
+        NSNull *off = NSNull.null;
+        none = @{@"bounds": off, @"position": off, @"frame": off};
+    });
+    return none;
+}
+
 @implementation SGRKaraokeWordView {
     CAGradientLayer *_fill;
     NSArray<UILabel *> *_letters;   // the wave's: each letter lit on its own, empty for a word lifted whole
     CGFloat _filled, _lift;
     BOOL _rightToLeft;
+    BOOL _waveActive;
 }
 
 - (instancetype)initWithWord:(SGKaraokeWord *)word font:(UIFont *)font rightToLeft:(BOOL)rightToLeft {
@@ -196,36 +207,54 @@ static UIView *letterHost(NSString *text, UIFont *font, CGRect bounds, NSArray<U
     NSArray<UILabel *> *letters = nil;
     _lit = waves ? letterHost(word.text, font, self.bounds, &letters) : wordLabel(word.text, font, UIColor.whiteColor, self.bounds, rightToLeft);
     _letters = letters;
-    // Hidden until the line is sung: a masked layer is drawn offscreen every frame even when the
-    // mask leaves nothing of it, and a song has hundreds of words waiting their turn.
+    // Hidden and unmasked until the sweep edge reaches this word: attaching a CALayer.mask to every
+    // word on an active line forces 12-25 offscreen GPU FBO passes per frame even on 0%-lit or 100%-lit words.
     _lit.hidden = YES;
     [self addSubview:_lit];
 
     CGFloat width = self.bounds.size.width + sgFillEdge;
     _fill = [CAGradientLayer layer];
+    _fill.actions = wordMaskNoActions();
     _fill.colors = @[(id)UIColor.whiteColor.CGColor, (id)UIColor.whiteColor.CGColor, (id)UIColor.clearColor.CGColor];
     _fill.locations = @[@0, @((width - sgFillEdge) / width), @1];
     _fill.startPoint = CGPointMake(rightToLeft ? 1 : 0, 0.5);
     _fill.endPoint = CGPointMake(rightToLeft ? 0 : 1, 0.5);
-    _lit.layer.mask = _fill;
     _filled = NAN;
     [self fillTo:-CGFLOAT_MAX];
     return self;
 }
 
 // The cursor is in line units and the feathered edge is centred on it, so the edge runs on through
-// the space into the next word instead of starting over at each one. Right to left, the mask is the
-// same one turned around: white from the word's right edge, the feather `local` in from it.
+// the space into the next word instead of starting over at each one. Only words currently crossed
+// by the feathered edge carry _lit.layer.mask; unreached words stay hidden and completed words
+// drop their mask so CoreAnimation draws plain unmasked text sprites (saving ~90% of offscreen FBOs).
 - (void)fillTo:(CGFloat)cursor {
     CGFloat width = self.bounds.size.width, height = self.bounds.size.height;
-    CGFloat local = MAX(-sgFillEdge / 2, MIN(width + sgFillEdge / 2, cursor - _offset));
-    if (local == _filled) return;
+    CGFloat halfEdge = sgFillEdge * 0.5;
+    CGFloat minLocal = -halfEdge, maxLocal = width + halfEdge;
+    CGFloat local = MAX(minLocal, MIN(maxLocal, cursor - _offset));
+    BOOL atStart = local <= minLocal + 0.01;
+    BOOL atEnd = local >= maxLocal - 0.01;
+    if (!isnan(_filled)) {
+        if (atStart && _filled <= minLocal + 0.01 && _lit.hidden && !_lit.layer.mask) return;
+        if (atEnd && _filled >= maxLocal - 0.01 && !_lit.hidden && !_lit.layer.mask) return;
+        if (!atStart && !atEnd && fabs(local - _filled) < 0.25 && !_lit.hidden && _lit.layer.mask == _fill) return;
+    }
     _filled = local;
-    CGFloat left = _rightToLeft ? width - local - sgFillEdge / 2 : local - sgFillEdge / 2 - width;
-    [CATransaction begin];
-    [CATransaction setDisableActions:YES];
-    _fill.frame = CGRectMake(left, -height / 2, width + sgFillEdge, height * 2);
-    [CATransaction commit];
+
+    if (atStart) {
+        if (!_lit.hidden) _lit.hidden = YES;
+        if (_lit.layer.mask) _lit.layer.mask = nil;
+        return;
+    }
+    if (_lit.hidden) _lit.hidden = NO;
+    if (atEnd) {
+        if (_lit.layer.mask) _lit.layer.mask = nil;
+        return;
+    }
+    if (_lit.layer.mask != _fill) _lit.layer.mask = _fill;
+    CGFloat left = _rightToLeft ? width - local - halfEdge : local - halfEdge - width;
+    _fill.frame = CGRectMake(left, -height * 0.5, width + sgFillEdge, height * 2);
 }
 
 // Rises like a critically damped spring let go as the word starts: no jolt, a long soft landing.
@@ -235,11 +264,23 @@ static UIView *letterHost(NSString *text, UIFont *font, CGRect bounds, NSArray<U
         [self waveAt:ms];
         return;
     }
-    double x = MAX(0, ms - _riseStart + kFloatLeadMs) / MAX(_riseEnd - _riseStart, sgFloatMinMs) * 5;
-    CGFloat lift = sgLift * (1 - (1 + x) * exp(-x));
-    if (lift == _lift) return;
+    double elapsed = ms - _riseStart + kFloatLeadMs;
+    CGFloat lift;
+    if (elapsed <= 0) {
+        if (_lift == 0) return;
+        lift = 0;
+    } else {
+        double x = elapsed / MAX(_riseEnd - _riseStart, sgFloatMinMs) * 5;
+        if (x >= 7.0) {
+            if (_lift == sgLift) return;
+            lift = sgLift;
+        } else {
+            lift = sgLift * (1 - (1 + x) * exp(-x));
+            if (fabs(lift - _lift) < 0.04) return;
+        }
+    }
     _lift = lift;
-    self.transform = CGAffineTransformMakeTranslation(0, -lift);
+    self.transform = lift == 0 ? CGAffineTransformIdentity : CGAffineTransformMakeTranslation(0, -lift);
 }
 
 // Each letter's pulse: it rises and glows as the sweep reaches it and comes back down, the letters after it a
@@ -247,10 +288,22 @@ static UIView *letterHost(NSString *text, UIFont *font, CGRect bounds, NSArray<U
 - (void)waveAt:(double)ms {
     NSUInteger count = _letters.count;
     double span = MAX(_riseEnd - _riseStart, sgFloatMinMs);
+    double startMs = _riseStart - kFloatLeadMs;
+    if (ms <= startMs || ms >= startMs + span) {
+        if (!_waveActive) return;
+        _waveActive = NO;
+        for (NSUInteger i = 0; i < count; i++) {
+            UILabel *letter = _letters[i];
+            letter.transform = CGAffineTransformIdentity;
+            letter.layer.shadowOpacity = 0;
+        }
+        return;
+    }
+    _waveActive = YES;
     double width = MIN(span, MAX(450, span * sgSpread));
     CGFloat radius = sgGlow * sgGlowGain;
     for (NSUInteger i = 0; i < count; i++) {
-        double begin = _riseStart - kFloatLeadMs + (count > 1 ? (double)i / (count - 1) : 0) * (span - width);
+        double begin = startMs + (count > 1 ? (double)i / (count - 1) : 0) * (span - width);
         double p = (ms - begin) / width, f = 0;
         if (p > 0 && p < 1) {
             f = sin(M_PI * p);
@@ -260,8 +313,8 @@ static UIView *letterHost(NSString *text, UIFont *font, CGRect bounds, NSArray<U
         CALayer *layer = letter.layer;
         CGFloat lift = sgLetterLift * sgWaveGain * f;
         CGFloat opacity = MIN(1, MAX(0, f) * MIN(1, sgGlowGain));
-        if (fabs(layer.shadowOpacity - opacity) > 0.01 || letter.transform.ty != -lift) {
-            letter.transform = CGAffineTransformMakeTranslation(0, -lift);
+        if (fabs(layer.shadowOpacity - opacity) > 0.015 || fabs(letter.transform.ty + lift) > 0.05) {
+            letter.transform = lift == 0 ? CGAffineTransformIdentity : CGAffineTransformMakeTranslation(0, -lift);
             layer.shadowOpacity = (float)opacity;
             if (fabs(layer.shadowRadius - radius) > 0.05) layer.shadowRadius = radius;
         }
@@ -269,6 +322,7 @@ static UIView *letterHost(NSString *text, UIFont *font, CGRect bounds, NSArray<U
 }
 
 - (void)settle {
+    _waveActive = NO;
     for (UILabel *letter in _letters) {
         letter.transform = CGAffineTransformIdentity;
         letter.layer.shadowOpacity = 0;
@@ -619,6 +673,7 @@ typedef struct {
 @implementation SGRKaraokeSweep {
     SGSweepKnot *_knots;
     NSUInteger _knotCount;
+    NSUInteger _lastKnot;
     BOOL _whole;
 }
 
@@ -678,10 +733,12 @@ static double secant(SGSweepKnot *knots, NSUInteger i) {
 
 - (CGFloat)cursorAt:(double)ms {
     if (!_knotCount) return -CGFLOAT_MAX;
-    if (ms <= _knots[0].ms) return _knots[0].x;
-    if (_knotCount == 1 || ms >= _knots[_knotCount - 1].ms) return _knots[_knotCount - 1].x;
-    NSUInteger k = 0;
-    while (ms >= _knots[k + 1].ms) k++;
+    if (ms <= _knots[0].ms) { _lastKnot = 0; return _knots[0].x; }
+    if (_knotCount == 1 || ms >= _knots[_knotCount - 1].ms) { _lastKnot = _knotCount - 1; return _knots[_knotCount - 1].x; }
+    NSUInteger k = _lastKnot < _knotCount - 1 ? _lastKnot : 0;
+    if (ms < _knots[k].ms) k = 0;
+    while (k + 1 < _knotCount - 1 && ms >= _knots[k + 1].ms) k++;
+    _lastKnot = k;
     SGSweepKnot a = _knots[k], b = _knots[k + 1];
     double h = b.ms - a.ms, u = (ms - a.ms) / h, u2 = u * u, u3 = u2 * u;
     return (2 * u3 - 3 * u2 + 1) * a.x + (u3 - 2 * u2 + u) * h * a.slope
@@ -1050,7 +1107,6 @@ static const NSUInteger kLinesPerFrame = 4;
             [word.layer removeAllAnimations];
             [word.lit.layer removeAllAnimations];
             word.lit.alpha = 1;
-            word.lit.hidden = NO;
             [word fillTo:word.whole ? CGFLOAT_MAX : -CGFLOAT_MAX];
             [word settle];
             if (word.whole) [whole addObject:word];
@@ -1072,7 +1128,6 @@ static const NSUInteger kLinesPerFrame = 4;
         if (generation != self->_generation) return;
         for (SGRKaraokeWordView *word in self->_words) {
             [word fillTo:-CGFLOAT_MAX];
-            word.lit.hidden = YES;
             word.lit.alpha = 1;
         }
     }];
@@ -1086,7 +1141,6 @@ static const NSUInteger kLinesPerFrame = 4;
 - (void)showPlain {
     [self unfreeze];
     for (SGRKaraokeWordView *word in _words) {
-        word.lit.hidden = NO;
         word.lit.alpha = 1;
         [word fillTo:CGFLOAT_MAX];
     }
@@ -1499,7 +1553,17 @@ typedef struct {
     }
 }
 
+- (void)updateLinkFrameRate {
+    if (!_link) return;
+    NSInteger maxFPS = UIScreen.mainScreen.maximumFramesPerSecond;
+    // In Smooth Mode (older chips, Low Power Mode, or thermal throttling), rock-solid 60 FPS halves
+    // GPU/CPU heat while keeping word-by-word karaoke timing completely fluid.
+    BOOL cap60 = maxFPS <= 60 || SGPerformanceSmooth();
+    _link.preferredFrameRateRange = cap60 ? CAFrameRateRangeMake(30, 60, 60) : CAFrameRateRangeMake(80, 120, 120);
+}
+
 - (void)performanceChanged {
+    [self updateLinkFrameRate];
     if (!SGPerformanceSmooth() || _browsing) return;
     for (SGRKaraokeLineView *view in _shown.allValues) {
         if (!view.active && view.blur > 0.05) [view freezeAtBlur:view.blur crossfade:NO];
@@ -1648,8 +1712,7 @@ typedef struct {
     if (!self.window || _link) return;
     if (UIApplication.sharedApplication.applicationState != UIApplicationStateActive) return;
     _link = [CADisplayLink displayLinkWithTarget:self selector:@selector(tick)];
-    NSInteger maxFPS = UIScreen.mainScreen.maximumFramesPerSecond;
-    _link.preferredFrameRateRange = maxFPS <= 60 ? CAFrameRateRangeMake(30, 60, 60) : CAFrameRateRangeMake(80, 120, 120);
+    [self updateLinkFrameRate];
     [_link addToRunLoop:NSRunLoop.mainRunLoop forMode:NSRunLoopCommonModes];
 }
 

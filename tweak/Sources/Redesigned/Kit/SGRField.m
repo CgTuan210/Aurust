@@ -57,12 +57,10 @@ static NSArray *fillFadeColorsFor(CGColorRef base) {
     return colors;
 }
 
-// How much of the material's blur the lyrics add over the Fill artwork: a little, not enough to lose the cover.
-static const CGFloat kLyricsBlur = 0.3;
+// Subtle dark frosting added over the pre-blurred Fill cover when lyrics open.
+static const float kLyricsDimOpacity = 0.24f;
 
 @implementation SGRArtworkField {
-    UIVisualEffectView *_lyricsBlur;
-    UIViewPropertyAnimator *_lyricsBlurAnimator;
     BOOL _lyricsBlurred;
     CALayer *_solid;
     CAGradientLayer *_black;
@@ -70,7 +68,9 @@ static const CGFloat kLyricsBlur = 0.3;
     CALayer *_fillBackground;
     CALayer *_fill;
     CALayer *_fillBlur;
+    CALayer *_fillLyricsBlur;
     CAGradientLayer *_fillFade;
+    CALayer *_fillLyricsDim;
     SGRFlowLayer *_flow;
     SGRFluidLayer *_fluidLayer;
     BOOL _watching;
@@ -147,6 +147,14 @@ static const CGFloat kLyricsBlur = 0.3;
     _fillBlur.contentsGravity = kCAGravityResizeAspectFill;
     [_fill addSublayer:_fillBlur];
 
+    // Pre-blurred Fill artwork shown while lyrics are open: 0 ms live GPU blur shader vs UIVisualEffectView.
+    _fillLyricsBlur = [CALayer layer];
+    _fillLyricsBlur.actions = noActions();
+    _fillLyricsBlur.contentsGravity = kCAGravityResizeAspectFill;
+    _fillLyricsBlur.opacity = 0;
+    _fillLyricsBlur.hidden = YES;
+    [_fill addSublayer:_fillLyricsBlur];
+
     _fillFade = [CAGradientLayer layer];
     _fillFade.actions = noActions();
     _fillFade.startPoint = CGPointMake(0.5, 0);
@@ -155,6 +163,13 @@ static const CGFloat kLyricsBlur = 0.3;
     _fillFade.hidden = YES;
     [self syncFillFadeColor];
     [self.layer addSublayer:_fillFade];
+
+    _fillLyricsDim = [CALayer layer];
+    _fillLyricsDim.actions = noActions();
+    _fillLyricsDim.backgroundColor = UIColor.blackColor.CGColor;
+    _fillLyricsDim.opacity = 0;
+    _fillLyricsDim.hidden = YES;
+    [self.layer addSublayer:_fillLyricsDim];
     return self;
 }
 
@@ -184,8 +199,6 @@ static const CGFloat kLyricsBlur = 0.3;
     [CATransaction begin];
     [CATransaction setDisableActions:YES];
     _solid.frame = painted;
-    _lyricsBlur.frame = painted;
-    if (_lyricsBlur && self.subviews.lastObject != _lyricsBlur) [self bringSubviewToFront:_lyricsBlur];
     CGFloat height = windowHeight(self), total = MAX(1, painted.size.height);
     CGFloat from = height * kBlackFrom + bleed.top;
     CGFloat to = MAX(from + 1, height * kBlackTo + bleed.top);
@@ -198,15 +211,14 @@ static const CGFloat kLyricsBlur = 0.3;
     _fill.frame = fillFrame;
     _fillBlur.frame = _fill.bounds;
     _fillBlur.contentsGravity = bounds.size.width > fillHeight ? kCAGravityResize : kCAGravityResizeAspectFill;
+    _fillLyricsBlur.frame = _fill.bounds;
     _fillFade.frame = fillFrame;
+    _fillLyricsDim.frame = painted;
     _flow.frame = CGRectMake(0, 0, bounds.size.width, [self backdropHeightNow]);
     _fluidLayer.frame = painted;
     // The screen's part of it, so the copies turn about it and the shade ends at the screen's foot.
     _fluidLayer.visibleRect = CGRectMake(bleed.left, bleed.top, bounds.size.width, height);
     [CATransaction commit];
-    // Layout must not recreate a fractional visual effect: stopping and restarting it made the blur
-    // visibly flicker after pauses and transitions. State changes still rebuild it through setFills
-    // and setLyricsBlurred.
 }
 
 #pragma mark - the moving field
@@ -228,6 +240,7 @@ static const CGFloat kLyricsBlur = 0.3;
     _fill.hidden = fluid || _flows || !_fills || !_image.CGImage;
     _fillFade.hidden = _fill.hidden;
     if (fluid && _image) [_fluidLayer setArtwork:_image animated:NO];
+    [self applyLyricsBlurAnimated:NO];
     [self watch];
     [self updateMotion];
     [self setNeedsLayout];
@@ -249,6 +262,7 @@ static const CGFloat kLyricsBlur = 0.3;
     _fill.hidden = flows || _fluid || !_fills || !_image.CGImage;
     _fillFade.hidden = _fill.hidden;
     if (!flows) _flow.hidden = YES;
+    [self applyLyricsBlurAnimated:NO];
     [self watch];
     [self updateMotion];
     [self setNeedsLayout];
@@ -260,38 +274,43 @@ static const CGFloat kLyricsBlur = 0.3;
     [self applyLyricsBlurAnimated:animated];
 }
 
+- (void)animateLayerOpacity:(CALayer *)layer to:(float)target animated:(BOOL)animated {
+    CALayer *shown = layer.presentationLayer ?: layer;
+    float from = shown.opacity;
+    layer.opacity = target;
+    [layer removeAnimationForKey:@"opacity"];
+    if (!animated || fabsf(from - target) < 0.005f) return;
+    CABasicAnimation *fade = [CABasicAnimation animationWithKeyPath:@"opacity"];
+    fade.fromValue = @(from);
+    fade.toValue = @(target);
+    fade.duration = 0.28;
+    fade.timingFunction = [CAMediaTimingFunction functionWithName:kCAMediaTimingFunctionEaseInEaseOut];
+    [layer addAnimation:fade forKey:@"opacity"];
+}
+
 - (void)applyLyricsBlurAnimated:(BOOL)animated {
-    BOOL on = _lyricsBlurred && _fills;
-    if (!on && !_lyricsBlur) return;
-    if (!_lyricsBlur) {
-        _lyricsBlur = [[UIVisualEffectView alloc] initWithEffect:nil];
-        _lyricsBlur.overrideUserInterfaceStyle = UIUserInterfaceStyleDark;
-        _lyricsBlur.userInteractionEnabled = NO;
-        _lyricsBlur.accessibilityElementsHidden = YES;
-        _lyricsBlur.frame = self.bounds;
-        [self addSubview:_lyricsBlur];
+    BOOL on = _lyricsBlurred && _fills && !_fluid && !_flows;
+    BOOL shouldAnimate = animated && self.window != nil && !SGRReduceMotion();
+    [CATransaction begin];
+    [CATransaction setDisableActions:YES];
+    BOOL hasBlurImage = _fillLyricsBlur.contents != nil;
+    _fillLyricsBlur.hidden = !(on || shouldAnimate) || !hasBlurImage;
+    _fillLyricsDim.hidden = !(on || shouldAnimate);
+    [self animateLayerOpacity:_fillLyricsBlur to:(on && hasBlurImage) ? 1.0f : 0.0f animated:shouldAnimate && hasBlurImage];
+    [self animateLayerOpacity:_fillLyricsDim to:on ? kLyricsDimOpacity : 0.0f animated:shouldAnimate];
+    [CATransaction commit];
+    if (!on && shouldAnimate) {
+        __weak SGRArtworkField *weakSelf = self;
+        dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(0.3 * NSEC_PER_SEC)), dispatch_get_main_queue(), ^{
+            SGRArtworkField *field = weakSelf;
+            if (!field || (field->_lyricsBlurred && field->_fills && !field->_fluid && !field->_flows)) return;
+            [CATransaction begin];
+            [CATransaction setDisableActions:YES];
+            field->_fillLyricsBlur.hidden = YES;
+            field->_fillLyricsDim.hidden = YES;
+            [CATransaction commit];
+        });
     }
-    if (self.subviews.lastObject != _lyricsBlur) [self bringSubviewToFront:_lyricsBlur];
-    CGFloat intensity = on ? kLyricsBlur : 0;
-    void (^apply)(void) = ^{
-        UIViewPropertyAnimator *old = self->_lyricsBlurAnimator;
-        if (old && old.state != UIViewAnimatingStateInactive) [old stopAnimation:YES];
-        self->_lyricsBlurAnimator = nil;
-        self->_lyricsBlur.effect = nil;
-        if (intensity <= 0) return;
-        __weak UIVisualEffectView *weak = self->_lyricsBlur;
-        UIViewPropertyAnimator *fractional = [[UIViewPropertyAnimator alloc] initWithDuration:1
-                                                                                        curve:UIViewAnimationCurveLinear
-                                                                                   animations:^{
-            weak.effect = [UIBlurEffect effectWithStyle:UIBlurEffectStyleSystemUltraThinMaterialDark];
-        }];
-        [fractional startAnimation];
-        [fractional pauseAnimation];
-        fractional.fractionComplete = intensity;
-        self->_lyricsBlurAnimator = fractional;
-    };
-    if (animated && self.window) SGRAnimate(SGRMotionFade, apply, nil);
-    else apply();
 }
 
 - (void)setFills:(BOOL)fills {
@@ -482,7 +501,9 @@ static const CGFloat kLyricsBlur = 0.3;
             [self syncFillFadeColor];
         }
         if (palette.fillBlur) _fillBlur.contents = (__bridge id)palette.fillBlur.CGImage;
+        if (palette.fillLyricsBlur) _fillLyricsBlur.contents = (__bridge id)palette.fillLyricsBlur.CGImage;
         [CATransaction commit];
+        [self applyLyricsBlurAnimated:NO];
     }
     [self applyColor:_preferred ?: palette.fieldColor animated:animated];
     [self didColor];

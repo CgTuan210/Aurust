@@ -90,6 +90,7 @@ static NSDictionary *noActions(void) {
     CAGradientLayer *_backFill, *_frontFill;
     CAShapeLayer *_backShape, *_frontShape;
     UIVisualEffectView *_lyricsBlur;
+    UIView *_lyricsTint;
     UIViewPropertyAnimator *_lyricsBlurAnimator;
     BOOL _lyricsRequested;
     CADisplayLink *_link;
@@ -150,14 +151,18 @@ static CAGradientLayer *fill(CAShapeLayer *shape) {
     _lyricsBlur = [[UIVisualEffectView alloc] initWithEffect:nil];
     _lyricsBlur.overrideUserInterfaceStyle = UIUserInterfaceStyleDark;
     [self addSubview:_lyricsBlur];
+    _lyricsTint = [[UIView alloc] initWithFrame:frame];
+    _lyricsTint.backgroundColor = UIColor.blackColor;
+    _lyricsTint.alpha = 0;
+    [self addSubview:_lyricsTint];
     [self applyColors:@[UIColor.darkGrayColor, UIColor.darkGrayColor, UIColor.darkGrayColor, UIColor.darkGrayColor, UIColor.darkGrayColor]];
 
     NSNotificationCenter *center = NSNotificationCenter.defaultCenter;
     for (NSNotificationName name in @[UIApplicationDidBecomeActiveNotification, UIApplicationWillResignActiveNotification,
-                                      NSProcessInfoPowerStateDidChangeNotification, UIAccessibilityReduceMotionStatusDidChangeNotification,
-                                      SGPerformanceDidChangeNotification]) {
+                                      NSProcessInfoPowerStateDidChangeNotification, UIAccessibilityReduceMotionStatusDidChangeNotification]) {
         [center addObserver:self selector:@selector(updateMotionSoon) name:name object:nil];
     }
+    [center addObserver:self selector:@selector(performanceChanged) name:SGPerformanceDidChangeNotification object:nil];
     [center addObserver:self selector:@selector(artworkChanged) name:SGRNowPlayingArtworkDidChangeNotification object:nil];
     [center addObserver:self selector:@selector(updateBlurOpacity) name:SGRPlayerBlurOpacityDidChangeNotification object:nil];
     [self updateBlurOpacity];
@@ -173,9 +178,33 @@ static CAGradientLayer *fill(CAShapeLayer *shape) {
     [_link invalidate];
 }
 
-- (void)updateBlurOpacity {
+- (void)applyLyricsBlur:(BOOL)blurred {
     CGFloat opacity = MIN(100, MAX(0, SGInt(SGRKeyPlayerVisualiserBlurOpacity, 100))) / 100.0;
-    _lyricsBlurAnimator = setBlurIntensity(_lyricsBlur, _lyricsBlurAnimator, _lyricsRequested ? opacity : 0);
+    BOOL smooth = SGPerformanceSmooth();
+    if (blurred && smooth && opacity > 0) {
+        // In Smooth Mode, avoid a full-screen live Metal UIBlurEffect behind 60/120 Hz lyrics:
+        // rasterizing the soft hills at 0.15x + dark tint gives a frosted look at negligible GPU cost.
+        _lyricsBlurAnimator = setBlurIntensity(_lyricsBlur, _lyricsBlurAnimator, 0);
+        _content.layer.shouldRasterize = YES;
+        _content.layer.rasterizationScale = 0.15;
+        _lyricsTint.alpha = 0.30 * opacity;
+    } else {
+        _content.layer.shouldRasterize = smooth;
+        if (smooth) _content.layer.rasterizationScale = 0.5;
+        _lyricsTint.alpha = 0;
+        _lyricsBlurAnimator = setBlurIntensity(_lyricsBlur, _lyricsBlurAnimator, blurred ? opacity : 0);
+    }
+}
+
+- (void)performanceChanged {
+    dispatch_async(dispatch_get_main_queue(), ^{
+        [self applyLyricsBlur:self->_lyricsRequested];
+        [self updateMotion];
+    });
+}
+
+- (void)updateBlurOpacity {
+    [self applyLyricsBlur:_lyricsRequested];
     if (_reading) needReader(NO);
 }
 
@@ -229,6 +258,7 @@ static CAGradientLayer *fill(CAShapeLayer *shape) {
     CGRect bounds = self.bounds;
     _content.frame = bounds;
     _lyricsBlur.frame = bounds;
+    _lyricsTint.frame = bounds;
     _backFill.frame = bounds;
     _frontFill.frame = bounds;
     _backShape.frame = bounds;
@@ -254,9 +284,8 @@ static CAGradientLayer *fill(CAShapeLayer *shape) {
 
 - (void)setBlurred:(BOOL)blurred animated:(BOOL)animated {
     _lyricsRequested = blurred;
-    CGFloat opacity = MIN(100, MAX(0, SGInt(SGRKeyPlayerVisualiserBlurOpacity, 100))) / 100.0;
     void (^apply)(void) = ^{
-        self->_lyricsBlurAnimator = setBlurIntensity(self->_lyricsBlur, self->_lyricsBlurAnimator, blurred ? opacity : 0);
+        [self applyLyricsBlur:blurred];
     };
     if (animated) SGRAnimate(SGRMotionFade, apply, nil);
     else apply();

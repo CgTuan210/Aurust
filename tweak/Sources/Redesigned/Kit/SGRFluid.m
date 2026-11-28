@@ -127,7 +127,13 @@ static UIImage *blurred(UIImage *image, BOOL contrast, CGFloat radius, CGFloat s
 - (instancetype)init {
     if (!(self = [super init])) return nil;
     self.masksToBounds = YES;
+    self.opaque = YES;
     self.backgroundColor = UIColor.blackColor.CGColor;
+    // The blurred fluid source is 128px zoomed >2x, so compositing all rotating layers into a small opaque
+    // backing store with hardware bilinear filtering looks identical while cutting GPU fill-rate >95%.
+    self.shouldRasterize = YES;
+    self.minificationFilter = kCAFilterLinear;
+    self.magnificationFilter = kCAFilterLinear;
     for (int i = 0; i < kCopies; i++) {
         _copies[i] = [CALayer layer];
         _copies[i].contentsGravity = kCAGravityResizeAspectFill;
@@ -169,12 +175,13 @@ static UIImage *blurred(UIImage *image, BOOL contrast, CGFloat radius, CGFloat s
     [self setArtwork:source animated:NO];
 }
 
-// In Smooth Mode, keep 3 counter-rotating layers so multi-directional interference stays rich while trimming full-screen overdraw.
+// In Smooth Mode, keep 3 counter-rotating layers and 0.2x composite scale so multi-directional interference stays rich on A8-class GPUs.
 - (void)applyWarp {
     _warp = SGRFluidValue(SGRFluidWarp) / 100.0;
     BOOL smooth = SGPerformanceSmooth();
     [CATransaction begin];
     [CATransaction setDisableActions:YES];
+    self.rasterizationScale = smooth ? 0.2 : 0.35;
     for (int i = 1; i < kCopies; i++) {
         BOOL hideExtra = smooth && i >= 3;
         _copies[i].hidden = hideExtra;
@@ -276,7 +283,7 @@ static UIImage *blurred(UIImage *image, BOOL contrast, CGFloat radius, CGFloat s
     _since = CACurrentMediaTime();
     _rate = SGRFluidValue(SGRFluidSpeed) / 100.0;
     BOOL smooth = SGPerformanceSmooth();
-    CAFrameRateRange rate = smooth ? CAFrameRateRangeMake(20, 60, 30) : CAFrameRateRangeMake(24, 60, 30);
+    CAFrameRateRange rate = smooth ? CAFrameRateRangeMake(15, 24, 20) : CAFrameRateRangeMake(20, 30, 24);
     int activeCopies = smooth ? 3 : kCopies;
     for (int i = 0; i < activeCopies; i++) {
         CFTimeInterval length = fabs(kCopy[i].turn);

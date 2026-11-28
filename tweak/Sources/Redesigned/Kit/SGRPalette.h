@@ -16,6 +16,7 @@ typedef struct {
 @property (nonatomic, readonly) UIImage *dissolve;   // nil unless asked for, 96px wide
 @property (nonatomic, readonly) NSArray<UIColor *> *flowColors;
 @property (nonatomic, readonly) UIImage *fillBlur;
+@property (nonatomic, readonly) UIImage *fillLyricsBlur;
 @property (nonatomic, readonly) UIColor *fillBackgroundColor;
 // nil to the completion when the image has no bitmap to read (a symbol, a CIImage).
 + (void)paletteForImage:(UIImage *)image request:(SGRPaletteRequest)request completion:(void (^)(SGRPalette *palette))completion;

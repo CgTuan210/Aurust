@@ -23,6 +23,7 @@ static const CGFloat kFlowSaturationLift = 1.25, kFlowSaturationMax = 0.9, kFlow
 @property (nonatomic, readwrite) UIImage *dissolve;
 @property (nonatomic, readwrite) NSArray<UIColor *> *flowColors;
 @property (nonatomic, readwrite) UIImage *fillBlur;
+@property (nonatomic, readwrite) UIImage *fillLyricsBlur;
 @property (nonatomic, readwrite) UIColor *fillBackgroundColor;
 @end
 
@@ -419,6 +420,11 @@ static UIColor *tintOf(CGImageRef image, UIColor *surface) {
                     palette.fillBackgroundColor = fillBackgroundColorFromPixels(px);
                     palette.fillBlur = fillBlurOf(cg, smooth);
                     if (!palette.fillBlur) SGLog(@"redesign kit: could not render Fill background blur layer");
+                    CGImageRef lyricsBlurred = newBlurred(cg, 160, 160, 2.6);
+                    if (lyricsBlurred) {
+                        palette.fillLyricsBlur = [UIImage imageWithCGImage:lyricsBlurred scale:1 orientation:UIImageOrientationUp];
+                        CGImageRelease(lyricsBlurred);
+                    }
                 }
                 CGFloat main[3];
                 UIColor *source = dominantIn(px, 0, 0, kSample, kSample, main)

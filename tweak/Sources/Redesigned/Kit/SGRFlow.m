@@ -31,7 +31,7 @@ static NSDictionary *noActions(void) {
     dispatch_once(&once, ^{
         NSNull *off = NSNull.null;
         none = @{@"bounds": off, @"position": off, @"frame": off, @"transform": off, @"backgroundColor": off,
-                 @"colors": off, @"hidden": off, @"opacity": off, @"shouldRasterize": off};
+                 @"colors": off, @"hidden": off, @"opacity": off, @"shouldRasterize": off, @"rasterizationScale": off};
     });
     return none;
 }
@@ -61,6 +61,14 @@ static NSArray *discColors(UIColor *color) {
 - (instancetype)init {
     if (!(self = [super init])) return nil;
     self.actions = noActions();
+    self.opaque = YES;
+    self.masksToBounds = YES;
+    // Composite all 5 radial discs + shade into one tiny opaque on-chip tile (~80x175 px in Smooth Mode)
+    // and blit once with hardware bilinear filtering, eliminating 6x full-screen overdraw during 60/120 Hz lyrics.
+    self.shouldRasterize = YES;
+    self.rasterizationScale = SGPerformanceSmooth() ? 0.2 : 0.35;
+    self.minificationFilter = kCAFilterLinear;
+    self.magnificationFilter = kCAFilterLinear;
     _base = [CALayer layer];
     _base.actions = noActions();
     _base.opaque = YES;
@@ -96,6 +104,10 @@ static NSArray *discColors(UIColor *color) {
 }
 
 - (void)performanceChanged {
+    [CATransaction begin];
+    [CATransaction setDisableActions:YES];
+    self.rasterizationScale = SGPerformanceSmooth() ? 0.2 : 0.35;
+    [CATransaction commit];
     if (!_moving) return;
     [self stop];
     [self start];
@@ -161,7 +173,7 @@ static NSArray *discColors(UIColor *color) {
 - (void)start {
     if (self.bounds.size.width < 1) return;
     _since = CACurrentMediaTime();
-    CAFrameRateRange rate = SGPerformanceSmooth() ? CAFrameRateRangeMake(20, 60, 30) : CAFrameRateRangeMake(24, 60, 30);
+    CAFrameRateRange rate = SGPerformanceSmooth() ? CAFrameRateRangeMake(15, 24, 20) : CAFrameRateRangeMake(20, 30, 24);
     for (int i = 0; i < kDiscs; i++) {
         CAGradientLayer *disc = _discs[i];
         CGPathRef loop = [self newLoopOf:i];

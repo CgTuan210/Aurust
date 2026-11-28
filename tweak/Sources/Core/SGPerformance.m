@@ -56,7 +56,7 @@ static void ensurePerformanceInitialized(void) {
                 BOOL after = SGPerformanceSmooth();
                 if (before != after) {
                     dispatch_async(dispatch_get_main_queue(), ^{
-                        [center postNotificationName:SGPerformanceDidChangeNotification object:nil];
+                        [NSNotificationCenter.defaultCenter postNotificationName:SGPerformanceDidChangeNotification object:nil];
                     });
                 }
             }];

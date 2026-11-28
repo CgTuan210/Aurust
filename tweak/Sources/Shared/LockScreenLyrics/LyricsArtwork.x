@@ -362,9 +362,11 @@ static void tick(void) {
         setWanted(artworkID, aheadID);
         SGLockMotionShowPlain(NO);
         SGLockLine *currentLine = lineAt(cues, index, resting, motion, sg_cover, style);
-        SGNowPlayingSetExtras(@"lyrics", @{MPNowPlayingInfoProperty3x4AnimatedArtwork:
-                                               artworkFor(artworkID, currentLine, remainingSeconds)},
-                              state.track.trackTitle);
+        MPMediaItemAnimatedArtwork *animatedArtwork = artworkFor(artworkID, currentLine, remainingSeconds);
+        if (animatedArtwork) {
+            SGNowPlayingSetExtras(@"lyrics", @{MPNowPlayingInfoProperty3x4AnimatedArtwork: animatedArtwork},
+                                  state.track.trackTitle);
+        }
         if (aheadID) {
             drawAhead(aheadID, lineAt(cues, index + 1, NO, motion, sg_cover, style), remainingSeconds);
         }

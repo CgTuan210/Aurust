@@ -10,7 +10,7 @@ __weak UIView *sgr_artistRoot = nil;
 
 %hook CALayer
 - (void)setBackgroundColor:(CGColorRef)color {
-    if (color) {
+    if (color && NSThread.isMainThread) {
         UIView *npb = sgr_nowPlayingRoot;
         UIView *lyrics = sgr_lyricsPageRoot;
         UIView *playlist = sgr_playlistRoot;

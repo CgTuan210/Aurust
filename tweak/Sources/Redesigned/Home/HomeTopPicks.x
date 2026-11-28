@@ -120,6 +120,8 @@ static CGFloat growth(CGFloat width) {
 // The page's layout, with the top shelf (and the heading just above it) laid out before the shortcuts: the two
 // blocks trade places, so the page is as tall as it was. Only frames change; the cells are Spotify's.
 static NSArray<NSIndexPath *> *pathsBetween(UICollectionView *list, NSIndexPath *from, NSIndexPath *to) {
+    NSInteger sections = list.numberOfSections;
+    if (from.section < 0 || to.section >= sections) return @[];
     NSMutableArray *paths = [NSMutableArray array];
     for (NSInteger sec = from.section; sec <= to.section; sec++) {
         NSInteger count = [list numberOfItemsInSection:sec];

@@ -127,7 +127,8 @@ static void pillTick(void) {
         pillResize(MAX(measured, kMinWidth));
         pillPlace(sg_pill.superview, top);
     }
-    CGFloat width = sg_rail.bounds.size.width * MAX(0, MIN(1, progress));
+    double clamped = isfinite(progress) ? MAX(0, MIN(1, progress)) : 0;
+    CGFloat width = sg_rail.bounds.size.width * clamped;
     if (fabs(sg_fill.frame.size.width - width) > 0.5) {
         CGRect filled = sg_fill.frame;
         filled.size.width = width;

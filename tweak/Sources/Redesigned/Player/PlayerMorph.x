@@ -266,6 +266,13 @@ static CGFloat screenRadius(void) {
     _cover = nil;
 }
 
+- (void)dealloc {
+    if (_overlayColor) {
+        CGColorRelease(_overlayColor);
+        _overlayColor = NULL;
+    }
+}
+
 @end
 
 static char kMorphKey;

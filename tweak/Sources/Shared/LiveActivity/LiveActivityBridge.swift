@@ -63,7 +63,8 @@ public final class SGLiveActivityBridge: NSObject {
                                   titles: [String], artists: [String], uris: [String],
                                   tab: Int, title: String, artist: String, shuffle: Bool, repeatMode: Int,
                                   timerEnd: Date?, timerEndOfTrack: Bool) {
-        let tracks = titles.indices.map {
+        let count = min(titles.count, min(artists.count, uris.count))
+        let tracks = (0..<count).map {
             SGLyricsAttributes.Track(title: titles[$0], artist: artists[$0], uri: uris[$0])
         }
         let state = SGLyricsAttributes.ContentState(

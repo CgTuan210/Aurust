@@ -62,7 +62,9 @@ static UIImage *blurred(UIImage *image, BOOL contrast, CGFloat radius, CGFloat s
     CGImageRef source = image.CGImage;
     if (!source) return nil;
     CIImage *input = [CIImage imageWithCGImage:source];
-    CGFloat scale = kBlurSide / MAX(input.extent.size.width, input.extent.size.height);
+    CGFloat maxSide = MAX(input.extent.size.width, input.extent.size.height);
+    if (!isfinite(maxSide) || maxSide <= 0) return nil;
+    CGFloat scale = kBlurSide / maxSide;
     input = [input imageByApplyingTransform:CGAffineTransformMakeScale(scale, scale)];
     CGRect extent = input.extent;
     CIImage *output = [[[input imageByClampingToExtent]
@@ -88,6 +90,7 @@ static UIImage *blurred(UIImage *image, BOOL contrast, CGFloat radius, CGFloat s
     CGContextDrawImage(bitmap, CGRectMake(0, 0, width, height), cg);
     CGImageRelease(cg);
     unsigned char *pixels = CGBitmapContextGetData(bitmap);
+    if (!pixels) { CGContextRelease(bitmap); return nil; }
     float ceiling = contrast ? 0.04f : 0.07f;
     float fGain = (float)gain;
     size_t total = width * height;
@@ -98,9 +101,9 @@ static UIImage *blurred(UIImage *image, BOOL contrast, CGFloat radius, CGFloat s
         float b = fGain * sByteToLinear[p[2]];
         float light = 0.2126f * r + 0.7152f * g + 0.0722f * b;
         float cap = light > ceiling ? ceiling / light : 1.0f;
-        int ir = (int)(MIN(1.0f, r * cap) * 4096.0f + 0.5f);
-        int ig = (int)(MIN(1.0f, g * cap) * 4096.0f + 0.5f);
-        int ib = (int)(MIN(1.0f, b * cap) * 4096.0f + 0.5f);
+        int ir = (int)(MAX(0.0f, MIN(1.0f, r * cap)) * 4096.0f + 0.5f);
+        int ig = (int)(MAX(0.0f, MIN(1.0f, g * cap)) * 4096.0f + 0.5f);
+        int ib = (int)(MAX(0.0f, MIN(1.0f, b * cap)) * 4096.0f + 0.5f);
         p[0] = sLinearToByte[ir];
         p[1] = sLinearToByte[ig];
         p[2] = sLinearToByte[ib];

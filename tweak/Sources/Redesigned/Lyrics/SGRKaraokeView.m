@@ -216,7 +216,7 @@ static NSDictionary *wordMaskNoActions(void) {
     _fill = [CAGradientLayer layer];
     _fill.actions = wordMaskNoActions();
     _fill.colors = @[(id)UIColor.whiteColor.CGColor, (id)UIColor.whiteColor.CGColor, (id)UIColor.clearColor.CGColor];
-    _fill.locations = @[@0, @((width - sgFillEdge) / width), @1];
+    _fill.locations = @[@0, @(width > 0 ? (width - sgFillEdge) / width : 1), @1];
     _fill.startPoint = CGPointMake(rightToLeft ? 1 : 0, 0.5);
     _fill.endPoint = CGPointMake(rightToLeft ? 0 : 1, 0.5);
     _filled = NAN;
@@ -784,7 +784,9 @@ static CGColorSpaceRef karaokeBlurColorSpace(void) {
 }
 
 static CGImageRef createLineContentSnapshot(CALayer *contentLayer, CGSize boundsSize) {
-    if (boundsSize.width < 1 || boundsSize.height < 1) return NULL;
+    if (!isfinite(boundsSize.width) || !isfinite(boundsSize.height)
+        || boundsSize.width < 1 || boundsSize.height < 1
+        || boundsSize.width > 2048 || boundsSize.height > 2048) return NULL;
     size_t sw = (size_t)ceil((boundsSize.width + kBlurSnapInset * 2) * kBlurSnapScale);
     size_t sh = (size_t)ceil((boundsSize.height + kBlurSnapInset * 2) * kBlurSnapScale);
     CGContextRef ctx = CGBitmapContextCreate(NULL, sw, sh, 8, sw * 4, karaokeBlurColorSpace(),
@@ -800,9 +802,9 @@ static CGImageRef createLineContentSnapshot(CALayer *contentLayer, CGSize bounds
 }
 
 static UIImage *renderFrozenBlurImage(CGImageRef snapshot, CGSize boundsSize, CGFloat blurPt, CGSize *outPad) {
-    if (!snapshot || boundsSize.width < 1 || boundsSize.height < 1 || blurPt <= 0.05) return nil;
+    if (!snapshot || !isfinite(blurPt) || boundsSize.width < 1 || boundsSize.height < 1 || blurPt <= 0.05) return nil;
     size_t sw = CGImageGetWidth(snapshot), sh = CGImageGetHeight(snapshot);
-    size_t extraPx = (size_t)ceil(blurPt * 2.2 * kBlurSnapScale);
+    size_t extraPx = MIN((size_t)ceil(blurPt * 2.2 * kBlurSnapScale), (size_t)128);
     size_t w = sw + extraPx * 2, h = sh + extraPx * 2;
     size_t rowBytes = w * 4;
     uint8_t *bufA = calloc(h, rowBytes);
@@ -825,7 +827,7 @@ static UIImage *renderFrozenBlurImage(CGImageRef snapshot, CGSize boundsSize, CG
     CGContextRelease(ctx);
 
     double sigmaPx = blurPt * kBlurSnapScale;
-    uint32_t halfW = (uint32_t)MAX(1, lround(sqrt(3.0 * sigmaPx * sigmaPx + 1.0)));
+    uint32_t halfW = (uint32_t)MIN(64L, MAX(1L, lround(sqrt(3.0 * sigmaPx * sigmaPx + 1.0))));
     uint32_t kernel = (2 * halfW - 1) | 1;
     vImage_Buffer vA = {bufA, h, w, rowBytes};
     vImage_Buffer vB = {bufB, h, w, rowBytes};
@@ -1520,6 +1522,8 @@ typedef struct {
 }
 
 - (void)dealloc {
+    [_link invalidate];
+    _scroll.delegate = nil;
     [NSNotificationCenter.defaultCenter removeObserver:self];
     free(_spans);
     free(_breaks);

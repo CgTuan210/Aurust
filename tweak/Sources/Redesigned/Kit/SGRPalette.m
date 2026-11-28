@@ -82,6 +82,7 @@ static BOOL sampleImage64(CGImageRef image, uint8_t outPixels[kSample * kSample 
 
 static void drawFilling(CGContextRef context, CGImageRef image, size_t width, size_t height) {
     CGFloat iw = CGImageGetWidth(image), ih = CGImageGetHeight(image);
+    if (iw <= 0 || ih <= 0) return;
     CGFloat scale = MAX(width / iw, height / ih);
     CGContextSetInterpolationQuality(context, kCGInterpolationMedium);
     CGContextDrawImage(context, CGRectMake((width - iw * scale) / 2, (height - ih * scale) / 2, iw * scale, ih * scale), image);

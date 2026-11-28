@@ -9,7 +9,7 @@ __weak UIView *sg_npvBackdropRoot = nil;
 
 %hook CALayer
 - (void)setBackgroundColor:(CGColorRef)color {
-    if (color) {
+    if (color && NSThread.isMainThread) {
         UIView *card = sg_lyricsCardRoot;
         UIView *page = sg_lyricsPageRoot;
         UIView *home = sg_homeRoot;

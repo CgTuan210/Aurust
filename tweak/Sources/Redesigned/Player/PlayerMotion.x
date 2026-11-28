@@ -249,6 +249,8 @@ static UIViewPropertyAnimator *setBlurIntensity(UIVisualEffectView *view, UIView
 
 - (void)dealloc {
     [NSNotificationCenter.defaultCenter removeObserver:self];
+    if (_seamBlurAnimator && _seamBlurAnimator.state != UIViewAnimatingStateInactive) [_seamBlurAnimator stopAnimation:YES];
+    if (_lyricsBlurAnimator && _lyricsBlurAnimator.state != UIViewAnimatingStateInactive) [_lyricsBlurAnimator stopAnimation:YES];
     // AVFoundation tears a looping player down while it plays: pause, then stop the looper, before both go.
     [_player pause];
     [_looper disableLooping];

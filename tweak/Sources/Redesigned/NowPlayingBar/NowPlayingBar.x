@@ -135,6 +135,8 @@ static BOOL roundedArtworkEnabled(void) {
 }
 
 - (void)setProgress:(CGFloat)progress thickness:(CGFloat)thickness {
+    if (!isfinite(progress)) progress = 0;
+    if (!isfinite(thickness)) thickness = 0;
     CGFloat clamped = MIN(1, MAX(0, progress));
     CGFloat thick = MIN(5, MAX(0, thickness));
     BOOL hidden = thick <= 0;
@@ -214,7 +216,8 @@ static void updateMiniProgress(void) {
 
     SPTPlayerState *state = SGPlayerState();
     double position = state.isPaused ? state.positionAsOfTimestamp : state.position;
-    CGFloat progress = state.duration > 0 ? (CGFloat)(position / state.duration) : 0;
+    double duration = state.duration;
+    CGFloat progress = (duration > 0 && isfinite(position) && isfinite(duration)) ? (CGFloat)(position / duration) : 0;
     [(SGRMiniProgressView *)custom setProgress:progress thickness:thick];
     if (!state || state.isPaused || !custom.window || sg_docked || thick <= 0
         || UIApplication.sharedApplication.applicationState != UIApplicationStateActive) {

@@ -176,6 +176,11 @@ static CAGradientLayer *fill(CAShapeLayer *shape) {
 - (void)dealloc {
     [NSNotificationCenter.defaultCenter removeObserver:self];
     [_link invalidate];
+    if (_reading) {
+        _reading = NO;
+        needReader(NO);
+    }
+    if (_lyricsBlurAnimator && _lyricsBlurAnimator.state != UIViewAnimatingStateInactive) [_lyricsBlurAnimator stopAnimation:YES];
 }
 
 - (void)applyLyricsBlur:(BOOL)blurred {

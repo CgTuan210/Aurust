@@ -51,6 +51,7 @@ static const CGFloat kBackdropWidth = 128;
 
 CGImageRef SGLyricsClipBackdrop(CGImageRef cover, CGSize size) {
     CGContextRef context = newContext(size, NULL, 0);
+    if (!context) return NULL;
     CGRect bounds = {CGPointZero, size};
     CGContextSetRGBFillColor(context, 0.11, 0.11, 0.12, 1);
     CGContextFillRect(context, bounds);
@@ -59,19 +60,21 @@ CGImageRef SGLyricsClipBackdrop(CGImageRef cover, CGSize size) {
         static dispatch_once_t once;
         // On the CPU: the lock screen asks while Spotify is in the background, where GPU work gets it killed.
         dispatch_once(&once, ^{ renderer = [CIContext contextWithOptions:@{kCIContextUseSoftwareRenderer: @YES}]; });
-        CGSize small = CGSizeMake(kBackdropWidth, round(kBackdropWidth * size.height / size.width));
+        CGSize small = CGSizeMake(kBackdropWidth, round(kBackdropWidth * size.height / MAX(size.width, 1)));
         CIImage *image = [CIImage imageWithCGImage:cover];
-        CGFloat scale = MAX(small.width / image.extent.size.width, small.height / image.extent.size.height);
-        image = [image imageByApplyingTransform:CGAffineTransformMakeScale(scale, scale)];
-        image = [image imageByApplyingTransform:CGAffineTransformMakeTranslation((small.width - image.extent.size.width) / 2,
-                                                                                 (small.height - image.extent.size.height) / 2)];
-        image = [[image imageByClampingToExtent] imageByApplyingGaussianBlurWithSigma:small.width * 0.05];
-        CGImageRef blurred = [renderer createCGImage:image fromRect:(CGRect){CGPointZero, small}];
-        CGContextSetInterpolationQuality(context, kCGInterpolationHigh);
-        if (blurred) CGContextDrawImage(context, bounds, blurred);
-        CGImageRelease(blurred);
-        CGContextSetRGBFillColor(context, 0, 0, 0, 0.45);
-        CGContextFillRect(context, bounds);
+        if (image.extent.size.width > 0 && image.extent.size.height > 0) {
+            CGFloat scale = MAX(small.width / image.extent.size.width, small.height / image.extent.size.height);
+            image = [image imageByApplyingTransform:CGAffineTransformMakeScale(scale, scale)];
+            image = [image imageByApplyingTransform:CGAffineTransformMakeTranslation((small.width - image.extent.size.width) / 2,
+                                                                                     (small.height - image.extent.size.height) / 2)];
+            image = [[image imageByClampingToExtent] imageByApplyingGaussianBlurWithSigma:small.width * 0.05];
+            CGImageRef blurred = [renderer createCGImage:image fromRect:(CGRect){CGPointZero, small}];
+            CGContextSetInterpolationQuality(context, kCGInterpolationHigh);
+            if (blurred) CGContextDrawImage(context, bounds, blurred);
+            CGImageRelease(blurred);
+            CGContextSetRGBFillColor(context, 0, 0, 0, 0.45);
+            CGContextFillRect(context, bounds);
+        }
     }
     CGImageRef backdrop = CGBitmapContextCreateImage(context);
     CGContextRelease(context);
@@ -157,6 +160,7 @@ static BOOL drawWordsIntoContext(CGContextRef context, NSString *previous, NSStr
 static CGImageRef newWords(NSString *previous, NSString *line, NSString *next, CGSize size) CF_RETURNS_RETAINED {
     if (!previous.length && !line.length && !next.length) return NULL;
     CGContextRef context = newContext(size, NULL, 0);
+    if (!context) return NULL;
     drawWordsIntoContext(context, previous, line, next, size, NO);
     CGImageRef words = CGBitmapContextCreateImage(context);
     CGContextRelease(context);
@@ -172,6 +176,7 @@ static void drawFrame(CGContextRef context, CGImageRef backdrop, CGImageRef word
 
 CGImageRef SGLyricsClipFrame(CGImageRef backdrop, NSString *line, NSString *next, CGSize size) {
     CGContextRef context = newContext(size, NULL, 0);
+    if (!context) return NULL;
     if (backdrop) CGContextDrawImage(context, (CGRect){CGPointZero, size}, backdrop);
     drawWordsIntoContext(context, nil, line, next, size, NO);
     CGImageRef frame = CGBitmapContextCreateImage(context);
@@ -209,10 +214,14 @@ BOOL SGLyricsClipWriteImage(NSURL *file, CGImageRef image, CGSize size) {
     if (ok) {
         CVPixelBufferLockBaseAddress(buffer, 0);
         CGContextRef context = newContext(size, CVPixelBufferGetBaseAddress(buffer), CVPixelBufferGetBytesPerRow(buffer));
-        CGContextDrawImage(context, (CGRect){CGPointZero, size}, image);
-        CGContextRelease(context);
+        if (context) {
+            CGContextDrawImage(context, (CGRect){CGPointZero, size}, image);
+            CGContextRelease(context);
+        } else {
+            ok = NO;
+        }
         CVPixelBufferUnlockBaseAddress(buffer, 0);
-        ok = [adaptor appendPixelBuffer:buffer withPresentationTime:kCMTimeZero];
+        if (ok) ok = [adaptor appendPixelBuffer:buffer withPresentationTime:kCMTimeZero];
         CVPixelBufferRelease(buffer);
     }
     if (!ok) {
@@ -224,8 +233,9 @@ BOOL SGLyricsClipWriteImage(NSURL *file, CGImageRef image, CGSize size) {
     [writer endSessionAtSourceTime:CMTimeMake(kStillSeconds, 1)];
     dispatch_semaphore_t written = dispatch_semaphore_create(0);
     [writer finishWritingWithCompletionHandler:^{ dispatch_semaphore_signal(written); }];
-    dispatch_semaphore_wait(written, DISPATCH_TIME_FOREVER);
-    if (writer.status != AVAssetWriterStatusCompleted) {
+    if (dispatch_semaphore_wait(written, dispatch_time(DISPATCH_TIME_NOW, 15 * NSEC_PER_SEC)) != 0
+        || writer.status != AVAssetWriterStatusCompleted) {
+        [writer cancelWriting];
         [NSFileManager.defaultManager removeItemAtURL:partial error:nil];
         return NO;
     }
@@ -283,10 +293,14 @@ BOOL SGLyricsClipWrite(NSURL *file, CGImageRef backdrop, NSString *line, NSStrin
         if (!ok) break;
         CVPixelBufferLockBaseAddress(buffer, 0);
         CGContextRef context = newContext(size, CVPixelBufferGetBaseAddress(buffer), CVPixelBufferGetBytesPerRow(buffer));
-        drawFrame(context, backdrop, words, size, (double)i / frames);
-        CGContextRelease(context);
+        if (context) {
+            drawFrame(context, backdrop, words, size, (double)i / frames);
+            CGContextRelease(context);
+        } else {
+            ok = NO;
+        }
         CVPixelBufferUnlockBaseAddress(buffer, 0);
-        ok = [adaptor appendPixelBuffer:buffer withPresentationTime:CMTimeMake(i, kFPS)];
+        if (ok) ok = [adaptor appendPixelBuffer:buffer withPresentationTime:CMTimeMake(i, kFPS)];
         CVPixelBufferRelease(buffer);
     }
     CGImageRelease(words);
@@ -299,8 +313,9 @@ BOOL SGLyricsClipWrite(NSURL *file, CGImageRef backdrop, NSString *line, NSStrin
     [writer endSessionAtSourceTime:length];
     dispatch_semaphore_t written = dispatch_semaphore_create(0);
     [writer finishWritingWithCompletionHandler:^{ dispatch_semaphore_signal(written); }];
-    dispatch_semaphore_wait(written, DISPATCH_TIME_FOREVER);
-    if (writer.status != AVAssetWriterStatusCompleted) {
+    if (dispatch_semaphore_wait(written, dispatch_time(DISPATCH_TIME_NOW, 15 * NSEC_PER_SEC)) != 0
+        || writer.status != AVAssetWriterStatusCompleted) {
+        [writer cancelWriting];
         [NSFileManager.defaultManager removeItemAtURL:partial error:nil];
         return NO;
     }
@@ -339,7 +354,7 @@ static AVAssetTrack *motionTrackForFile(NSURL *motionFile, AVURLAsset **outAsset
         track = tracks.firstObject;
         dispatch_semaphore_signal(loaded);
     }];
-    dispatch_semaphore_wait(loaded, DISPATCH_TIME_FOREVER);
+    if (dispatch_semaphore_wait(loaded, dispatch_time(DISPATCH_TIME_NOW, 10 * NSEC_PER_SEC)) != 0) return nil;
     if (!track || !CGAffineTransformIsIdentity(track.preferredTransform)) return nil;
 
     CGSize raw = CGSizeMake(round(track.naturalSize.width), round(track.naturalSize.height));
@@ -591,8 +606,9 @@ BOOL SGLyricsClipWriteOverMotion(NSURL *file, NSURL *motionFile, NSString *previ
     [writer endSessionAtSourceTime:CMTimeMakeWithSeconds(seconds, 600)];
     dispatch_semaphore_t written = dispatch_semaphore_create(0);
     [writer finishWritingWithCompletionHandler:^{ dispatch_semaphore_signal(written); }];
-    dispatch_semaphore_wait(written, DISPATCH_TIME_FOREVER);
-    if (writer.status != AVAssetWriterStatusCompleted) {
+    if (dispatch_semaphore_wait(written, dispatch_time(DISPATCH_TIME_NOW, 15 * NSEC_PER_SEC)) != 0
+        || writer.status != AVAssetWriterStatusCompleted) {
+        [writer cancelWriting];
         [NSFileManager.defaultManager removeItemAtURL:partial error:nil];
         return NO;
     }

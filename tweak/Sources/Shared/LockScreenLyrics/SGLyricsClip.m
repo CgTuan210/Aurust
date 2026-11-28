@@ -378,6 +378,10 @@ static Over makeOver(CGSize cut, NSString *previous, NSString *line, NSString *n
     uint8_t *data = calloc(height, rowBytes);
     if (!data) return (Over){0};
     CGContextRef context = newContext(cut, data, rowBytes);
+    if (!context) {
+        free(data);
+        return (Over){0};
+    }
     BOOL hasWords = previous.length || line.length || next.length;
     if (!hasWords) {
         CGContextSetRGBFillColor(context, 0, 0, 0, kMotionDim);
@@ -492,6 +496,7 @@ CGImageRef SGLyricsClipMotionFrame(NSURL *motionFile, NSString *previous, NSStri
     __block CGImageRef frame = NULL;
     eachFrame(asset, track, motion, from, motion.length, nil, ^BOOL(CVPixelBufferRef buffer, CMTime time) {
         CGContextRef context = newContext(motion.cut, NULL, 0);
+        if (!context) return NO;
         void *dst = CGBitmapContextGetData(context);
         size_t dstRowBytes = CGBitmapContextGetBytesPerRow(context);
         if (blendOver(buffer, motion, &over, dst, dstRowBytes)) {

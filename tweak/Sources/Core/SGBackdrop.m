@@ -36,6 +36,12 @@ UIImage *SGBackdropSample(UIImage *cover) {
     CGColorSpaceRef space = CGColorSpaceCreateWithName(kCGColorSpaceSRGB);
     CGContextRef ctx = CGBitmapContextCreate(bufA, kCoverSample, kCoverSample, 8, rowBytes, space,
                                              kCGImageAlphaPremultipliedFirst | kCGBitmapByteOrder32Little);
+    if (!ctx) {
+        CGColorSpaceRelease(space);
+        free(bufA);
+        free(bufB);
+        return cover;
+    }
     CGImageRef src = cover.CGImage;
     CGFloat iw = CGImageGetWidth(src), ih = CGImageGetHeight(src);
     CGFloat scale = MAX((CGFloat)kCoverSample / MAX(iw, 1), (CGFloat)kCoverSample / MAX(ih, 1));
@@ -52,8 +58,8 @@ UIImage *SGBackdropSample(UIImage *cover) {
 
     CGContextRef outCtx = CGBitmapContextCreate(bufA, kCoverSample, kCoverSample, 8, rowBytes, space,
                                                 kCGImageAlphaPremultipliedFirst | kCGBitmapByteOrder32Little);
-    CGImageRef blurredCG = CGBitmapContextCreateImage(outCtx);
-    CGContextRelease(outCtx);
+    CGImageRef blurredCG = outCtx ? CGBitmapContextCreateImage(outCtx) : NULL;
+    if (outCtx) CGContextRelease(outCtx);
     CGColorSpaceRelease(space);
     free(bufA);
     free(bufB);

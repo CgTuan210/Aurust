@@ -218,6 +218,11 @@ static UIImage *fillBlurOf(CGImageRef image, BOOL smooth) {
     }
     uint8_t *dst = CGBitmapContextGetData(dstCtx);
     uint8_t *src = CGBitmapContextGetData(srcCtx);
+    if (!dst || !src) {
+        CGContextRelease(srcCtx);
+        CGContextRelease(dstCtx);
+        return nil;
+    }
     memset(dst, 0, side * side * 4);
     size_t firstRow = (size_t)floor(bands[0][0] * (double)side);
     for (NSUInteger index = 0; index < 4; index++) {
@@ -409,6 +414,7 @@ static UIColor *tintOf(CGImageRef image, UIColor *surface) {
 
     CGFloat ceiling = contrast ? kFieldLightnessContrast : kFieldLightness;
     CGFloat flowCeiling = contrast ? kMaxLuminance : kFlowLuminanceMax;
+    CGImageRetain(cg);
     dispatch_async(paletteQueue(), ^{
         SGRPalette *palette = [paletteCache() objectForKey:cacheKey];
         if (!palette) {
@@ -450,9 +456,11 @@ static UIColor *tintOf(CGImageRef image, UIColor *surface) {
                 [paletteCache() setObject:palette forKey:cacheKey];
                 static dispatch_once_t once;
                 double ms = (CFAbsoluteTimeGetCurrent() - start) * 1000;
-                dispatch_once(&once, ^{ SGLog(@"redesign kit: first palette %@ from %zux%zu in %.1f ms", palette.fieldColor, CGImageGetWidth(cg), CGImageGetHeight(cg), ms); });
+                size_t cgWidth = CGImageGetWidth(cg), cgHeight = CGImageGetHeight(cg);
+                dispatch_once(&once, ^{ SGLog(@"redesign kit: first palette %@ from %zux%zu in %.1f ms", palette.fieldColor, cgWidth, cgHeight, ms); });
             }
         }
+        CGImageRelease(cg);
         dispatch_async(dispatch_get_main_queue(), ^{ completion(palette); });
     });
 }

@@ -62,8 +62,8 @@ void SGShapeGlass(UIView *glass, CGFloat radius, BOOL capsule) {
     CGFloat effective = capsule && !supportsConfig ? glass.bounds.size.height / 2 : radius;
     NSNumber *last = objc_getAssociatedObject(glass, &kGlassShapeKey);
     // Pack capsule bit + 0.25pt-quantized radius so unchanged layout passes return in O(1).
-    NSInteger stamp = ((NSInteger)llround(effective * 4.0) << 1) | (capsule ? 1 : 0);
-    if (last && last.integerValue == stamp) return;
+    NSUInteger stamp = ((NSUInteger)llround(MAX(effective, 0) * 4.0) << 1) | (capsule ? 1 : 0);
+    if (last && last.unsignedIntegerValue == stamp) return;
 
     id shape = nil;
     if (supportsConfig && [glass respondsToSelector:@selector(setCornerConfiguration:)]) {
